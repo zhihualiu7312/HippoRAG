@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from hipporag_extensions import (
     DiffusionPolicy,
     LearnedDiffusionPolicy,
+    MLPDiffusionPolicy,
     QueryInducedGraphConstructor,
     adaptive_personalized_pagerank,
 )
@@ -91,3 +92,30 @@ def test_learned_policy_updates_relation_weights_from_pairwise_ranking():
 
     assert policy.relation_weights.get("semantic", 1.0) > 1.0
     assert policy.relation_weights.get("citation", 1.0) < 1.0
+
+
+def test_mlp_policy_outputs_relation_weights():
+    graph = {
+        "seed": {"positive": 1.0, "negative": 1.0},
+        "positive": {},
+        "negative": {},
+    }
+    policy_model = MLPDiffusionPolicy(hidden_dim=4, learning_rate=0.1)
+    examples = [
+        {
+            "query": "hybrid bonding",
+            "seeds": {"seed": 1.0},
+            "positive_node": "positive",
+            "negative_node": "negative",
+            "edge_relations": {
+                ("seed", "positive"): "semantic",
+                ("seed", "negative"): "citation",
+            },
+        }
+    ]
+
+    policy_model.fit_pairwise(graph, examples, epochs=20, learning_rate=0.1)
+    policy = policy_model.predict("hybrid bonding", {"seed": 1.0})
+
+    assert policy.relation_weights.get("semantic", 1.0) != 1.0
+    assert policy.relation_weights.get("citation", 1.0) != 1.0

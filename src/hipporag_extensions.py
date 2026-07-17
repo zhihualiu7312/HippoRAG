@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from math import exp
 from typing import Callable, Hashable, Iterable, List, Mapping, MutableMapping, Protocol, Sequence
 
+import numpy as np
+
 Node = Hashable
 Graph = Mapping[Node, Mapping[Node, float]]
 
@@ -188,6 +190,173 @@ class LearnedDiffusionPolicy:
         return None
 
 
+@dataclass
+class MLPDiffusionPolicy:
+    """A lightweight MLP-based diffusion policy for query-conditioned transition weights."""
+
+    hidden_dim: int = 8
+    learning_rate: float = 0.05
+    min_restart: float = 0.05
+    max_restart: float = 0.45
+    min_depth: int = 4
+    max_depth: int = 20
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_query_node_biases", {})
+        object.__setattr__(self, "_relation_names", [])
+        object.__setattr__(self, "_relation_to_idx", {})
+        object.__setattr__(self, "_W1", np.zeros((2 + 1, self.hidden_dim), dtype=float))
+        object.__setattr__(self, "_b1", np.zeros(self.hidden_dim, dtype=float))
+        object.__setattr__(self, "_W2", np.zeros((self.hidden_dim, 1), dtype=float))
+        object.__setattr__(self, "_b2", np.zeros(1, dtype=float))
+
+    def fit_pairwise(
+        self,
+        graph: Graph,
+        examples: Sequence[Mapping[str, object]],
+        epochs: int = 50,
+        learning_rate: float | None = None,
+    ) -> None:
+        """Train a tiny MLP to prefer positive relations over negative ones."""
+
+        if learning_rate is not None:
+            self.learning_rate = learning_rate
+
+        for _ in range(epochs):
+            for example in examples:
+                query = str(example.get("query", ""))
+                seeds = dict(example.get("seeds", {}))
+                positive_node = str(example.get("positive_node", ""))
+                negative_node = str(example.get("negative_node", ""))
+                edge_relations = dict(example.get("edge_relations", {}))
+
+                positive_relation = self._extract_relation(edge_relations, positive_node) or "default"
+                negative_relation = self._extract_relation(edge_relations, negative_node) or "default"
+                self._ensure_relation(positive_relation)
+                self._ensure_relation(negative_relation)
+
+                policy = self.predict(query, seeds)
+                scores = adaptive_personalized_pagerank(graph, seeds, policy, edge_relations=edge_relations or None)
+                positive_score = scores.get(positive_node, 0.0)
+                negative_score = scores.get(negative_node, 0.0)
+
+                margin = positive_score - negative_score
+                if margin <= 0.0:
+                    update_step = self.learning_rate * 0.2
+                else:
+                    update_step = self.learning_rate * 0.01
+
+                self._query_node_biases[(query, positive_node)] = self._query_node_biases.get((query, positive_node), 0.0) + update_step
+                self._query_node_biases[(query, negative_node)] = self._query_node_biases.get((query, negative_node), 0.0) - update_step
+
+                pos_feature = self._build_feature(query, positive_relation)
+                neg_feature = self._build_feature(query, negative_relation)
+                self._train_feature(pos_feature, 1.2)
+                self._train_feature(neg_feature, 0.8)
+
+    def predict(self, query: str, seeds: Mapping[Node, float]) -> DiffusionPolicy:
+        """Return a diffusion policy produced by the learned MLP."""
+
+        token_count = max(1, len(query.split()))
+        seed_entropy_proxy = len([score for score in seeds.values() if score > 0])
+        complexity = min(1.0, (token_count / 18.0 + seed_entropy_proxy / 12.0) / 2.0)
+
+        restart = self.min_restart + (self.max_restart - self.min_restart) * complexity
+        depth = round(self.min_depth + (self.max_depth - self.min_depth) * complexity)
+
+        node_gates: dict[Node, float] = {}
+        for node in set(self._query_node_biases):
+            if node[0] == query:
+                bias = self._query_node_biases[node]
+                node_gates[node[1]] = max(0.0, min(1.0, 1.0 + bias))
+
+        relation_weights = {
+            relation: max(0.1, min(3.0, float(self._predict_relation_weight(query, relation))))
+            for relation in self._relation_names
+        }
+
+        return DiffusionPolicy(
+            restart=restart,
+            depth=depth,
+            relation_weights=relation_weights,
+            node_gates=node_gates,
+            default_gate=1.0,
+        ).clamped(self.min_restart, self.max_restart, self.min_depth, self.max_depth)
+
+    def _ensure_relation(self, relation: str) -> None:
+        if relation not in self._relation_to_idx:
+            idx = len(self._relation_names)
+            self._relation_names.append(relation)
+            self._relation_to_idx[relation] = idx
+            new_dim = 2 + len(self._relation_names)
+            old_W1 = self._W1
+            old_b1 = self._b1
+            old_W2 = self._W2
+            old_b2 = self._b2
+            self._W1 = np.zeros((new_dim, self.hidden_dim), dtype=float)
+            self._W1[: old_W1.shape[0], :] = old_W1
+            self._b1 = np.zeros(self.hidden_dim, dtype=float)
+            self._b1[:] = old_b1
+            self._W2 = np.zeros((self.hidden_dim, 1), dtype=float)
+            self._W2[:] = old_W2
+            self._b2 = np.zeros(1, dtype=float)
+            self._b2[:] = old_b2
+
+    def _build_feature(self, query: str, relation: str) -> np.ndarray:
+        token_count = max(1, len(query.split()))
+        query_complexity = min(1.0, token_count / 18.0)
+        feature = np.zeros((2 + len(self._relation_names),), dtype=float)
+        feature[0] = query_complexity
+        feature[1] = 1.0
+        if relation in self._relation_to_idx:
+            feature[2 + self._relation_to_idx[relation]] = 1.0
+        return feature
+
+    def _predict_relation_weight(self, query: str, relation: str) -> float:
+        self._ensure_relation(relation)
+        feature = self._build_feature(query, relation)
+        return self._forward(feature)
+
+    def _forward(self, feature: np.ndarray) -> float:
+        x = feature.reshape(1, -1)
+        z1 = x @ self._W1 + self._b1
+        h = np.tanh(z1)
+        out = h @ self._W2 + self._b2
+        pred = 1.0 / (1.0 + np.exp(-float(out[0, 0])))
+        return 0.5 + pred
+
+    def _train_feature(self, feature: np.ndarray, target: float) -> None:
+        x = feature.reshape(1, -1)
+        z1 = x @ self._W1 + self._b1
+        h = np.tanh(z1)
+        out = h @ self._W2 + self._b2
+        pred = 1.0 / (1.0 + np.exp(-float(out[0, 0])))
+
+        output = 0.5 + pred
+        delta = 2.0 * (output - target)
+        grad_W2 = h.T * delta
+        grad_b2 = np.array([delta], dtype=float)
+        grad_h = self._W2.T * delta
+        grad_z1 = grad_h * (1.0 - h * h)
+        grad_W1 = x.T @ grad_z1
+        grad_b1 = grad_z1[0]
+
+        self._W1 -= self.learning_rate * grad_W1
+        self._b1 -= self.learning_rate * grad_b1
+        self._W2 -= self.learning_rate * grad_W2
+        self._b2 -= self.learning_rate * grad_b2
+
+    def _extract_relation(
+        self,
+        edge_relations: Mapping[tuple[Node, Node], str],
+        node: Node,
+    ) -> str | None:
+        for (src, dst), relation in edge_relations.items():
+            if dst == node:
+                return str(relation)
+        return None
+
+
 @dataclass(slots=True)
 class QueryInducedGraphConstructor:
     """Builds a query-specific local graph before diffusion."""
@@ -321,6 +490,7 @@ def sigmoid_keep_scorer(query_embedding: Iterable[float], node_embedding: Iterab
 __all__ = [
     "DiffusionPolicy",
     "LearnedDiffusionPolicy",
+    "MLPDiffusionPolicy",
     "QueryInducedGraphConstructor",
     "adaptive_personalized_pagerank",
     "sigmoid_keep_scorer",
