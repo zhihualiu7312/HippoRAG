@@ -193,6 +193,38 @@ class BaseConfig:
         default=0.5,
         metadata={"help": "Damping factor for ppr algorithm."}
     )
+    use_query_induced_graph: bool = field(
+        default=False,
+        metadata={"help": "If True, construct a query-specific local graph before diffusion."}
+    )
+    local_graph_max_hops: int = field(
+        default=2,
+        metadata={"help": "Maximum expansion depth for the query-induced local graph."}
+    )
+    local_graph_max_nodes: int = field(
+        default=2000,
+        metadata={"help": "Maximum number of nodes in the query-induced local graph."}
+    )
+    use_query_aware_diffusion: bool = field(
+        default=False,
+        metadata={"help": "If True, use query-aware diffusion policy instead of fixed damping only."}
+    )
+    diffusion_min_restart: float = field(
+        default=0.05,
+        metadata={"help": "Minimum restart probability for adaptive diffusion."}
+    )
+    diffusion_max_restart: float = field(
+        default=0.45,
+        metadata={"help": "Maximum restart probability for adaptive diffusion."}
+    )
+    diffusion_min_depth: int = field(
+        default=4,
+        metadata={"help": "Minimum diffusion depth for adaptive diffusion."}
+    )
+    diffusion_max_depth: int = field(
+        default=20,
+        metadata={"help": "Maximum diffusion depth for adaptive diffusion."}
+    )
     
     
     # QA specific attributes

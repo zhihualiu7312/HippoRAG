@@ -37,6 +37,7 @@ from .utils.typing import Triple
 from .utils.config_utils import BaseConfig
 from .utils.state_utils import remove_sources_from_mapping
 from .utils.qa_utils import reason_step
+from hipporag_extensions import DiffusionPolicy, QueryInducedGraphConstructor
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,10 @@ class HippoRAG:
         self.openie_results_path = os.path.join(self.global_config.save_dir,f'openie_results_ner_{self.global_config.llm_name.replace("/", "_")}.json')
 
         self.rerank_filter = DSPyFilter(self)
+        self.query_graph_constructor = QueryInducedGraphConstructor(
+            max_nodes=self.global_config.local_graph_max_nodes,
+            max_hops=self.global_config.local_graph_max_hops,
+        )
 
         self.ready_to_retrieve = False
 
@@ -1652,7 +1657,12 @@ class HippoRAG:
 
         #Running PPR algorithm based on the passage and phrase weights previously assigned
         ppr_start = time.time()
-        ppr_sorted_doc_ids, ppr_sorted_doc_scores = self.run_ppr(node_weights, damping=self.global_config.damping)
+        ppr_sorted_doc_ids, ppr_sorted_doc_scores = self.run_ppr(
+            node_weights,
+            damping=self.global_config.damping,
+            query=query,
+            seed_scores={self.node_name_to_vertex_idx.get(k, None): v for k, v in linking_score_map.items() if self.node_name_to_vertex_idx.get(k, None) is not None},
+        )
         ppr_end = time.time()
 
         self.ppr_time += (ppr_end - ppr_start)
@@ -1713,9 +1723,27 @@ class HippoRAG:
             logger.error(f"Error in rerank_facts: {str(e)}")
             return [], [], {'facts_before_rerank': [], 'facts_after_rerank': [], 'error': str(e)}
     
+    def build_query_local_graph(self, query: str, seed_scores: Dict[int, float]) -> Dict[int, Dict[int, float]]:
+        """Construct a query-specific local graph around the current seed scores."""
+
+        if not self.global_config.use_query_induced_graph:
+            return {}
+
+        graph = {
+            idx: {
+                neighbor: float(weight)
+                for neighbor, weight in self.graph.get_adjlist()[idx].items()
+            }
+            for idx in range(len(self.graph.vs))
+        }
+        local_graph = self.query_graph_constructor.construct(query, graph, seed_scores)
+        return local_graph
+
     def run_ppr(self,
                 reset_prob: np.ndarray,
-                damping: float =0.5) -> Tuple[np.ndarray, np.ndarray]:
+                damping: float =0.5,
+                query: Optional[str] = None,
+                seed_scores: Optional[Dict[int, float]] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Runs Personalized PageRank (PPR) on a graph and computes relevance scores for
         nodes corresponding to document passages. The method utilizes a damping
@@ -1740,6 +1768,43 @@ class HippoRAG:
 
         if damping is None: damping = 0.5 # for potential compatibility
         reset_prob = np.where(np.isnan(reset_prob) | (reset_prob < 0), 0, reset_prob)
+
+        if self.global_config.use_query_induced_graph and query is not None and seed_scores:
+            local_graph = self.build_query_local_graph(query, seed_scores)
+            if local_graph:
+                graph_nodes = set(local_graph.keys())
+                if graph_nodes:
+                    pagerank_scores = self.graph.personalized_pagerank(
+                        vertices=graph_nodes,
+                        damping=damping,
+                        directed=False,
+                        weights='weight',
+                        reset=reset_prob,
+                        implementation='prpack'
+                    )
+                    doc_scores = np.array([pagerank_scores.get(idx, 0.0) for idx in self.passage_node_idxs])
+                    sorted_doc_ids = np.argsort(doc_scores)[::-1]
+                    sorted_doc_scores = doc_scores[sorted_doc_ids.tolist()]
+                    return sorted_doc_ids, sorted_doc_scores
+
+        if self.global_config.use_query_aware_diffusion and query is not None and seed_scores:
+            policy = DiffusionPolicy.from_query(
+                query,
+                seed_scores,
+                min_restart=self.global_config.diffusion_min_restart,
+                max_restart=self.global_config.diffusion_max_restart,
+                min_depth=self.global_config.diffusion_min_depth,
+                max_depth=self.global_config.diffusion_max_depth,
+            )
+            local_graph = self.build_query_local_graph(query, seed_scores)
+            if local_graph:
+                from hipporag_extensions import adaptive_personalized_pagerank
+                scores = adaptive_personalized_pagerank(local_graph, seed_scores, policy)
+                doc_scores = np.array([scores.get(idx, 0.0) for idx in self.passage_node_idxs])
+                sorted_doc_ids = np.argsort(doc_scores)[::-1]
+                sorted_doc_scores = doc_scores[sorted_doc_ids.tolist()]
+                return sorted_doc_ids, sorted_doc_scores
+
         pagerank_scores = self.graph.personalized_pagerank(
             vertices=range(len(self.node_name_to_vertex_idx)),
             damping=damping,
