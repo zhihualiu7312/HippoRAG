@@ -37,7 +37,7 @@ from .utils.typing import Triple
 from .utils.config_utils import BaseConfig
 from .utils.state_utils import remove_sources_from_mapping
 from .utils.qa_utils import reason_step
-from hipporag_extensions import DiffusionPolicy, QueryInducedGraphConstructor
+from hipporag_extensions import DiffusionPolicy, LearnedDiffusionPolicy, QueryInducedGraphConstructor
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +182,12 @@ class HippoRAG:
         self.query_graph_constructor = QueryInducedGraphConstructor(
             max_nodes=self.global_config.local_graph_max_nodes,
             max_hops=self.global_config.local_graph_max_hops,
+        )
+        self.learned_diffusion_policy = LearnedDiffusionPolicy(
+            min_restart=self.global_config.diffusion_min_restart,
+            max_restart=self.global_config.diffusion_max_restart,
+            min_depth=self.global_config.diffusion_min_depth,
+            max_depth=self.global_config.diffusion_max_depth,
         )
 
         self.ready_to_retrieve = False
@@ -1788,16 +1794,19 @@ class HippoRAG:
                     return sorted_doc_ids, sorted_doc_scores
 
         if self.global_config.use_query_aware_diffusion and query is not None and seed_scores:
-            policy = DiffusionPolicy.from_query(
-                query,
-                seed_scores,
-                min_restart=self.global_config.diffusion_min_restart,
-                max_restart=self.global_config.diffusion_max_restart,
-                min_depth=self.global_config.diffusion_min_depth,
-                max_depth=self.global_config.diffusion_max_depth,
-            )
             local_graph = self.build_query_local_graph(query, seed_scores)
             if local_graph:
+                if hasattr(self, "learned_diffusion_policy"):
+                    policy = self.learned_diffusion_policy.predict(query, seed_scores)
+                else:
+                    policy = DiffusionPolicy.from_query(
+                        query,
+                        seed_scores,
+                        min_restart=self.global_config.diffusion_min_restart,
+                        max_restart=self.global_config.diffusion_max_restart,
+                        min_depth=self.global_config.diffusion_min_depth,
+                        max_depth=self.global_config.diffusion_max_depth,
+                    )
                 from hipporag_extensions import adaptive_personalized_pagerank
                 scores = adaptive_personalized_pagerank(local_graph, seed_scores, policy)
                 doc_scores = np.array([scores.get(idx, 0.0) for idx in self.passage_node_idxs])

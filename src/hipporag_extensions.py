@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from math import exp
-from typing import Callable, Hashable, Iterable, List, Mapping, MutableMapping, Protocol
+from typing import Callable, Hashable, Iterable, List, Mapping, MutableMapping, Protocol, Sequence
 
 Node = Hashable
 Graph = Mapping[Node, Mapping[Node, float]]
@@ -101,6 +101,7 @@ class LearnedDiffusionPolicy:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_query_node_biases", {})
+        object.__setattr__(self, "_relation_weights", {})
 
     def fit_pairwise(
         self,
@@ -109,11 +110,7 @@ class LearnedDiffusionPolicy:
         epochs: int = 50,
         learning_rate: float | None = None,
     ) -> None:
-        """Fit the policy using a simple pairwise ranking objective.
-
-        The policy learns query-specific node gates so that a positive node
-        receives a higher diffusion score than a negative node.
-        """
+        """Fit the policy using a simple pairwise ranking objective over diffusion outcomes."""
 
         if learning_rate is not None:
             self.learning_rate = learning_rate
@@ -124,23 +121,35 @@ class LearnedDiffusionPolicy:
                 seeds = dict(example.get("seeds", {}))
                 positive_node = str(example.get("positive_node", ""))
                 negative_node = str(example.get("negative_node", ""))
+                edge_relations = dict(example.get("edge_relations", {}))
 
                 policy = self.predict(query, seeds)
-                scores = adaptive_personalized_pagerank(graph, seeds, policy)
+                scores = adaptive_personalized_pagerank(graph, seeds, policy, edge_relations=edge_relations or None)
                 positive_score = scores.get(positive_node, 0.0)
                 negative_score = scores.get(negative_node, 0.0)
 
                 margin = positive_score - negative_score
                 if margin <= 0.0:
                     update_step = self.learning_rate * 0.2
-                    self._query_node_biases[(query, positive_node)] = self._query_node_biases.get((query, positive_node), 0.0) + update_step
-                    self._query_node_biases[(query, negative_node)] = self._query_node_biases.get((query, negative_node), 0.0) - update_step
                 else:
-                    self._query_node_biases[(query, positive_node)] = self._query_node_biases.get((query, positive_node), 0.0) + self.learning_rate * 0.01
-                    self._query_node_biases[(query, negative_node)] = self._query_node_biases.get((query, negative_node), 0.0) - self.learning_rate * 0.01
+                    update_step = self.learning_rate * 0.01
+
+                if positive_node:
+                    self._query_node_biases[(query, positive_node)] = self._query_node_biases.get((query, positive_node), 0.0) + update_step
+                if negative_node:
+                    self._query_node_biases[(query, negative_node)] = self._query_node_biases.get((query, negative_node), 0.0) - update_step
+
+                positive_relation = self._extract_relation(edge_relations, positive_node)
+                negative_relation = self._extract_relation(edge_relations, negative_node)
+                if positive_relation is not None:
+                    current = self._relation_weights.get(positive_relation, 1.0)
+                    self._relation_weights[positive_relation] = max(0.1, min(3.0, current + update_step))
+                if negative_relation is not None:
+                    current = self._relation_weights.get(negative_relation, 1.0)
+                    self._relation_weights[negative_relation] = max(0.1, min(3.0, current - update_step))
 
     def predict(self, query: str, seeds: Mapping[Node, float]) -> DiffusionPolicy:
-        """Return a diffusion policy derived from the learned query-node biases."""
+        """Return a diffusion policy derived from the learned query-node biases and relation weights."""
 
         token_count = max(1, len(query.split()))
         seed_entropy_proxy = len([score for score in seeds.values() if score > 0])
@@ -155,13 +164,28 @@ class LearnedDiffusionPolicy:
                 bias = self._query_node_biases[node]
                 node_gates[node[1]] = max(0.0, min(1.0, 1.0 + bias))
 
+        relation_weights = {
+            relation: max(0.1, min(3.0, float(weight)))
+            for relation, weight in self._relation_weights.items()
+        }
+
         return DiffusionPolicy(
             restart=restart,
             depth=depth,
-            relation_weights={},
+            relation_weights=relation_weights,
             node_gates=node_gates,
             default_gate=1.0,
         ).clamped(self.min_restart, self.max_restart, self.min_depth, self.max_depth)
+
+    def _extract_relation(
+        self,
+        edge_relations: Mapping[tuple[Node, Node], str],
+        node: Node,
+    ) -> str | None:
+        for (src, dst), relation in edge_relations.items():
+            if dst == node:
+                return str(relation)
+        return None
 
 
 @dataclass(slots=True)
