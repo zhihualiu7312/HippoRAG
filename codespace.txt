@@ -1,0 +1,30 @@
+主要结论
+
+结果合理性: mog_results 显示
+Musique: 训练 61.56% vs 验证 55%（gap ≈ 6.5%）→ 明显过拟合。
+2wiki: 训练 75.86% vs 验证 75%（gap ≈ 0.86%）→ 稳定，收敛良好。
+实现/超参注意点: train_mog_policy.py 中函数 train_mog_policy_differentiable(..., margin=0.1, ...) 的默认 margin 与 CLI 在文件末尾设置的 --margin 默认 0.01 不同，实际训练以 CLI 参数为准（一般是 0.01）。此外训练是逐样本单步更新（非 mini-batch），每例一次优化，可能导致噪声较大。
+可能原因（Musique 过拟合）
+
+节点数非常大（131k nodes）导致传播/信号稀疏，模型容易记住训练对。
+训练样本较少（~1k examples），模型容量相对偏大或训练步骤过多。
+缺少显式正则（MoGMLP 无 dropout，Adam 未传 weight_decay）。
+负样本策略固定取 top-5 然后随机选一，可能样本不够多样。
+建议改进（按优先级）
+
+先做检索评估: 优先运行 retrieval eval（recall@k / MRR）比较 Phase 3 learned vs Phase 1 baseline，判断 pairwise accuracy 是否真的反映最终检索改进。
+正则化（高效）: 在 MoGMLP 中加入 nn.Dropout(p=0.2~0.4)，训练时给 Adam 设置 weight_decay=1e-4（L2）。这往往能快速缓解过拟合。
+改为 mini-batch 或 累积梯度: 当前按样本逐步更新噪声大且慢，改为 batch-size（例如 8–32）或梯度累积能稳定训练并加速。
+更多/更强的 negatives: 每个正例使用多个负样本并用合适的多负样本损失（例如 InfoNCE / 多负对比损失），或使用 hardest-k 代替随机选一个，以提升泛化。
+早停 & 按 eval 保存最优模型: 每轮 eval（不要只每 10 轮）后根据 eval loss/acc 保存最优 checkpoint，避免训练过头。
+调整超参（针对两类现象）:
+Musique（过拟合）：尝试减小模型（hidden_dim 从 32 → 16）、加 dropout、增加 weight_decay、或减少 epoch；也可增大 margin（例如 0.05–0.1）让正负差异更明显。
+2wiki（停滞/收敛快）：尝试增大 gate_k（5 → 10）或 ppr_depth（10 → 20）以增强传播/门控灵敏度，或小幅增加学习率/训练步数。
+数值/归一化注意:
+代码按 scores.max() 归一化（对每例用全局最大值），这是合理但要注意极端样本会影响尺度；可尝试温度缩放或 L2 归一化后的对比损失。
+seeds 向量当前按和归一化，若 seeds 非零但分布极不均，可考虑温度或 top-k 截断。
+监控与更细粒度评估: 把 eval 频率从 10 轮降到每轮或每 2-5 轮；记录更多指标（recall@1/5/10, MRR, avg pos/neg score 分布）。
+实现细节建议:
+在 MoGMLP.forward 中对未来 batch 兼容性把 softmax 维度改为最后一维（例如 .softmax(dim=-1)）。
+保存 checkpoint 时按 eval 指标保存最佳模型（而不是固定每 10 轮）。
+考虑将训练改为向量化批量计算（减少 Python 循环开销）。
