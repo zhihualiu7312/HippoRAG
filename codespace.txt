@@ -1,30 +1,705 @@
-主要结论
+# 특허출원 Peer Meeting 발표자료 (Patent Application Peer Meeting Presentation)
 
-结果合理性: mog_results 显示
-Musique: 训练 61.56% vs 验证 55%（gap ≈ 6.5%）→ 明显过拟合。
-2wiki: 训练 75.86% vs 验证 75%（gap ≈ 0.86%）→ 稳定，收敛良好。
-实现/超参注意点: train_mog_policy.py 中函数 train_mog_policy_differentiable(..., margin=0.1, ...) 的默认 margin 与 CLI 在文件末尾设置的 --margin 默认 0.01 不同，实际训练以 CLI 参数为准（一般是 0.01）。此外训练是逐样本单步更新（非 mini-batch），每例一次优化，可能导致噪声较大。
-可能原因（Musique 过拟合）
+---
 
-节点数非常大（131k nodes）导致传播/信号稀疏，模型容易记住训练对。
-训练样本较少（~1k examples），模型容量相对偏大或训练步骤过多。
-缺少显式正则（MoGMLP 无 dropout，Adam 未传 weight_decay）。
-负样本策略固定取 top-5 然后随机选一，可能样本不够多样。
-建议改进（按优先级）
+**과제명 (Task Name):** DS Co-Scientist Knowledge Agent
 
-先做检索评估: 优先运行 retrieval eval（recall@k / MRR）比较 Phase 3 learned vs Phase 1 baseline，判断 pairwise accuracy 是否真的反映最终检索改进。
-正则化（高效）: 在 MoGMLP 中加入 nn.Dropout(p=0.2~0.4)，训练时给 Adam 设置 weight_decay=1e-4（L2）。这往往能快速缓解过拟合。
-改为 mini-batch 或 累积梯度: 当前按样本逐步更新噪声大且慢，改为 batch-size（例如 8–32）或梯度累积能稳定训练并加速。
-更多/更强的 negatives: 每个正例使用多个负样本并用合适的多负样本损失（例如 InfoNCE / 多负对比损失），或使用 hardest-k 代替随机选一个，以提升泛化。
-早停 & 按 eval 保存最优模型: 每轮 eval（不要只每 10 轮）后根据 eval loss/acc 保存最优 checkpoint，避免训练过头。
-调整超参（针对两类现象）:
-Musique（过拟合）：尝试减小模型（hidden_dim 从 32 → 16）、加 dropout、增加 weight_decay、或减少 epoch；也可增大 margin（例如 0.05–0.1）让正负差异更明显。
-2wiki（停滞/收敛快）：尝试增大 gate_k（5 → 10）或 ppr_depth（10 → 20）以增强传播/门控灵敏度，或小幅增加学习率/训练步数。
-数值/归一化注意:
-代码按 scores.max() 归一化（对每例用全局最大值），这是合理但要注意极端样本会影响尺度；可尝试温度缩放或 L2 归一化后的对比损失。
-seeds 向量当前按和归一化，若 seeds 非零但分布极不均，可考虑温度或 top-k 截断。
-监控与更细粒度评估: 把 eval 频率从 10 轮降到每轮或每 2-5 轮；记录更多指标（recall@1/5/10, MRR, avg pos/neg score 分布）。
-实现细节建议:
-在 MoGMLP.forward 中对未来 batch 兼容性把 softmax 维度改为最后一维（例如 .softmax(dim=-1)）。
-保存 checkpoint 时按 eval 指标保存最佳模型（而不是固定每 10 轮）。
-考虑将训练改为向量化批量计算（减少 Python 循环开销）。
+**접수번호 (Application Number):** xxx
+
+**발명의 명칭 (Title of Invention):** System and Methods for Mixture of Granularity: Differentiable Query-Aware Graph Diffusion for Multi-Hop Retrieval
+
+**대표 발명자 (Representative Inventor):** Zhihua Liu
+
+**발표 일자 (Presentation Date):** 2026. 8. xx
+
+---
+
+## Slide 2: 특허 출원 요약서 (Patent Application Summary)
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+| | 본 발명 (This Invention) | 선행 기술 (Prior Art) |
+|---|---|---|
+| **발명명칭** | System and Methods for Mixture of Granularity: Differentiable Query-Aware Graph Diffusion for Multi-Hop Retrieval | — |
+| **과제명** | DS Co-Scientist Knowledge Agent | — |
+| **핵심 포인트 / Approach Idea** | A tri-granular graph topology (Passage–Paper–Entity) with a differentiable, query-aware gating mechanism that dynamically parameterizes information routing, adaptive filtering thresholds, and diffusion depths via a lightweight neural network guided by the query's latent semantics. | — |
+
+### 도면 (Drawings / Flowcharts)
+
+**본 발명 (This Invention) — Flowchart:**
+
+```
+Query Input
+    ↓
+[Query Embedding]
+    ↓
+┌──────────────────────────────────────────────────┐
+│         MoG Policy Network (MLP)                 │ ← Novel module
+│  Outputs: (α, β, γ, τ_pass, τ_paper, τ_ent, d)  │
+└──────────────────────────────────────────────────┘
+    ↓
+┌──────────────────────────────────────────────────┐
+│  Multi-Granularity Node Gating                   │ ← Novel module
+│  (Passage gate · Paper gate · Entity gate)       │
+│  g_v = σ(k × (sim(q, v) − τ_T))                 │
+└──────────────────────────────────────────────────┘
+    ↓
+┌──────────────────────────────────────────────────┐
+│  Gated PPR Diffusion on Tri-Granular Graph       │ ← Novel module
+│  M_gated = A · G                                 │
+│  p^(d+1) = d·p_0 + (1−d)·M_gated·p^(d)         │
+└──────────────────────────────────────────────────┘
+    ↓
+┌──────────────────────────────────────────────────┐
+│  Tri-Granular Graph Topology                     │ ← Novel module
+│  (Passage → Paper → Entity)                      │
+└──────────────────────────────────────────────────┘
+    ↓
+Retrieval Results (Ranked Passages)
+```
+
+**Legend:** Blue boxes = Novel modules from this patent; White boxes = Existing technology.
+
+**선행 기술 (Prior Art — HippoRAG 2) — Flowchart:**
+
+```
+Query Input
+    ↓
+[Query Embedding]
+    ↓
+┌──────────────────────────────────────────────────┐
+│  Fact Retrieval + Reranking (DSPy)              │  ← Existing
+└──────────────────────────────────────────────────┘
+    ↓
+┌──────────────────────────────────────────────────┐
+│  Standard PPR on Bi-granular Graph               │  ← Existing
+│  (Passage ↔ Entity only)                         │
+│  Fixed damping, no gating                        │
+└──────────────────────────────────────────────────┘
+    ↓
+Retrieval Results (Ranked Passages)
+```
+
+**Weak points of HippoRAG 2:**
+1. **Granularity mismatch**: Only two granularities (Passage + Entity), missing macro-level document context (Paper), causing structural message passing to get disoriented in entity-dense graphs.
+2. **Noise cascade**: Static text-agnostic diffusion propagates query-irrelevant information uniformly, overwhelming signals with noise in large graphs (e.g., 110k+ entity nodes).
+
+### 요지 (Summary / Key Points)
+
+1. **Tri-granular graph topology**: Injecting paper-level nodes to bridge macro-level document context with localized entity-passage semantics, eliminating "missing the forest for the trees."
+2. **Differentiable query-aware gating**: Smooth sigmoid gates controlled by an MLP policy network, dynamically filtering noise nodes based on query-node embedding similarity.
+3. **Learned Mixture of Granularity (MoG) routing**: A lightweight MLP outputs 7 parameters (α, β, γ, τ_pass, τ_paper, τ_ent, d_factor) per query, enabling end-to-end backpropagation through the graph diffusion.
+
+### 확보 가능 권리 범위 (Scope of Rights Obtainable)
+
+1. The overall tri-granular graph architecture (Passage–Paper–Entity) with LLM-summarized paper node embeddings.
+2. The differentiable query-aware gating mechanism with per-granularity sigmoid gates and adaptive thresholds.
+3. The learned MoG policy network that predicts routing weights, filtering thresholds, and damping factor from query embeddings.
+4. The end-to-end training framework with pairwise hinge loss for graph diffusion parameter learning.
+
+**Difference from Prior Art:**
+1. Tri-granular topology (Passage + Paper + Entity) vs. bi-granular (Passage + Entity only).
+2. Query-aware dynamic gating vs. static text-agnostic diffusion.
+3. Learned MLP-based parameter prediction vs. fixed heuristic parameters.
+4. End-to-end differentiable training vs. non-trainable PPR.
+
+### 출원 사유 (Reason for Application)
+
+Achieving a query-adaptive retrieval system that significantly outperforms state-of-the-art graph-based RAG (HippoRAG 2) by up to **12.91% relative improvement in Rec@10**, enabling more accurate knowledge retrieval for the DS Co-Scientist Knowledge Agent in the semiconductor domain.
+
+---
+
+## Slide 3: 선행기술과의 비교 (독창성/혁신성) — Comparison with Prior Art
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+Patent search results: to be done by patent officer.
+
+---
+
+## Slide 4: 발명의 배경 (Background of Invention) — Technology Domain
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### Patent technology domain
+
+Our method is a **graph-based Retrieval-Augmented Generation (Graph-RAG)** method that enhances multi-hop reasoning over knowledge graphs.
+
+Our method can be extended to any domain requiring knowledge graph-based retrieval (semiconductor papers, patents, general documents).
+
+```
+Retrieval-Augmented Generation (RAG)
+├── Sparse Retrieval Methods
+│   └── BM25, TF-IDF based methods
+├── Dense Retrieval Methods
+│   └── DPR, Contriever, GTR based methods
+└── Graph-based Retrieval Methods  ← Focus of this invention
+    ├── Standard PPR-based methods (HippoRAG, GraphRAG)
+    │   └── Fixed damping, text-agnostic diffusion
+    └── Query-Adaptive Diffusion Methods  ← This patent
+        └── Differentiable gating + learned routing (MoG)
+```
+
+---
+
+## Slide 5: 발명의 배경 (Background of Invention) — Scenario / Motivation
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### Scenario: Knowledge graph-based retrieval for semiconductor domain
+
+- **Objective**: Build knowledge graphs and invent an enhanced retrieval algorithm for public data (semiconductor domain papers and patents), to be integrated into the Knowledge Agent of DS Co-Scientist.
+
+- **Target task**: BLPM (a target task of Co-Scientist) — paper search and patent search using "open questions" and related technical keywords.
+
+- **Performance target**: Recall@K 30% improvement from the baseline.
+
+### Motivation: Two fundamental limitations of existing Graph-RAG
+
+1. **Granularity mismatch**:
+   - Standard frameworks construct graphs with only two granularities: Passages (text blocks) and Entities (lexical items).
+   - This binary formulation omits the macroscopic contextual anchor provided by the overarching document structure (Papers).
+   - Without a macro-level node to bind correlated passages, structural message passing gets disoriented in entity-dense graphs — "missing the forest for the trees."
+
+2. **Noise cascade**:
+   - Traditional PPR employs a fixed transition matrix where information spreads indiscriminately across all edges.
+   - In complex datasets (e.g., Musique), the graph explodes into massive configurations (110k+ entity nodes).
+   - Under flat, text-agnostic PPR, query-irrelevant entities act as infectious hubs, proliferating semantic noise.
+   - Retrieval accuracy at intermediate boundaries (Rec@10, Rec@20) suffers dramatic degradation.
+
+---
+
+## Slide 6: 발명의 배경 (Background of Invention) — Targets to be Retrieved
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### Knowledge graph node types in this invention
+
+- **Passage nodes**: Text chunks extracted from documents (papers/patents), encoded by embedding models.
+- **Paper nodes**: Macro-level document representations, created by LLM-summarizing all passages under the same title.
+- **Entity nodes**: Micro-level lexical items extracted via OpenIE (Named Entity Recognition + Triple extraction).
+
+The overall multi-granularity graph (not only individual nodes) will be constructed and used for retrieval.
+
+---
+
+## Slide 7: 발명의 구성 (1/3) — Composition of Invention
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### Compare of our proposed patent and most related prior art
+
+**Left: Diagram of our patent (MoG)**
+
+```
+Query Input
+    ↓
+[Query Embedding]
+    ↓
+┌───────────────────────────────┐
+│  MoG Policy Network (MLP)     │ ← Novel
+│  → (α, β, γ, τ_pass,          │
+│     τ_paper, τ_ent, d_factor) │
+└───────────────────────────────┘
+    ↓
+┌───────────────────────────────┐
+│  Multi-Granularity Gating     │ ← Novel
+│  (Passage/Paper/Entity gates) │
+└───────────────────────────────┘
+    ↓
+┌───────────────────────────────┐
+│  Gated PPR on                 │ ← Novel
+│  Tri-Granular Graph           │
+│  (Passage→Paper→Entity)       │
+└───────────────────────────────┘
+    ↓
+Ranked Retrieval Results
+```
+
+**Right: Diagram of HippoRAG 2 [1]**
+
+```
+Query Input
+    ↓
+[Query Embedding]
+    ↓
+┌───────────────────────────────┐
+│  Fact Retrieval + Reranking   │
+└───────────────────────────────┘
+    ↓
+┌───────────────────────────────┐
+│  Standard PPR on              │
+│  Bi-granular Graph             │
+│  (Passage ↔ Entity)            │
+│  Fixed damping, no gating      │
+└───────────────────────────────┘
+    ↓
+Ranked Retrieval Results
+```
+
+**Legend:** Blue boxes = Novel modules from this patent; White boxes = Existing technology.
+
+---
+
+## Slide 8: 발명의 구성 (2/3) — Composition of Invention
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### Motivation of this invention:
+
+- Employing a **differentiable, query-aware gating mechanism** to achieve adaptive information routing on knowledge graphs.
+
+- Designing a **tri-granular graph topology** (Passage–Paper–Entity) to fully leverage multi-level structural prior knowledge for robust and accurate retrieval.
+
+1. **First, construct a tri-granular graph** by introducing paper-level nodes that aggregate passages under the same document, providing macro-level semantic anchoring:
+   - Paper node embeddings are generated by LLM-summarizing all passages under the same title, ensuring macro-scale semantic consistency.
+   - Passage-paper edges are weighted by cosine similarity between passage and paper embeddings.
+
+2. **Second, apply query-aware gating** to suppress irrelevant nodes before diffusion:
+   - Sigmoid gate function: `g_v = σ(k × (sim(q, v) − τ_T))` where τ_T is a per-granularity threshold.
+   - Gates are applied to passage, paper, and entity nodes independently.
+
+3. **Finally, run gated PPR diffusion** with parameters predicted by a learned MoG policy network:
+   - The MLP outputs 7 parameters per query: routing weights (α, β, γ), thresholds (τ_pass, τ_paper, τ_ent), and damping factor (d_factor).
+   - All operations are differentiable, enabling end-to-end training.
+
+---
+
+## Slide 9: 발명의 구성 (3/3) — Composition of Invention
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### Five core modules of the proposed system:
+
+**1. Tri-Granular Graph Topology Construction**
+: Define the heterogeneous knowledge graph G = (V, E) where V = V_pass ∪ V_paper ∪ V_ent. For each document, create a paper node v ∈ V_paper. Every passage u ∈ V_pass is connected to v via a composition edge (u, v) ∈ E. The paper node representation e_paper is derived by LLM-summarizing and encoding all constituent passages.
+
+**2. Query-Aware Gating Mechanism**
+: Given a query vector q and a node v, compute semantic similarity sim(q, v) via cosine distance. Apply a smooth differentiable sigmoid gate: g_v = σ(k × (sim(q, v) − τ_T)), where k is a scaling hyperparameter and τ_T is the dynamically predicted activation threshold for node type T ∈ {pass, paper, ent}.
+
+**3. Differentiable Personalized PageRank**
+: Construct a diagonal gating matrix G where G_ii = g_{v_i}. The gated transition matrix M_gated = A · G. The PPR vector is solved iteratively: p^(d+1) = d_factor · p_0 + (1 − d_factor) · M_gated · p^(d), where d_factor is the damping parameter and p_0 is the query personalization vector.
+
+**4. Learned Mixture of Granularity (MoG) Policy**
+: A lightweight MLP acts as the central policy controller, outputting 7 parameters: Θ = MLP(q) = [α, β, γ, τ_pass, τ_paper, τ_ent, d_factor]. Here (α, β, γ) are soft routing weights distributing informational flow among heterogeneous node subsets; τ values feed into gate computation; d_factor controls diffusion depth.
+
+**5. End-to-End Training Framework**
+: Supervise the MoG policy network using a pairwise hinge loss: L = max(0, Δ − p(v+) + p(v−)) + λ‖W‖₂, where v+ is a ground-truth positive passage, v− is a hard-negative passage, Δ is the margin, and λ‖W‖₂ imposes weight decay regularization.
+
+---
+
+## Slide 10: 발명의 효과 (1/3) — Effects of Invention
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+- We can achieve **query-adaptive multi-granularity retrieval** with one unified framework, significantly outperforming state-of-the-art graph-based RAG.
+
+: By introducing paper-level nodes, the structural message passing is anchored at the macro level, preventing disorientation in entity-dense graphs.
+
+: By applying query-aware sigmoid gates with learned thresholds, noise nodes are dynamically suppressed, preventing noise cascade during diffusion.
+
+: By learning the MoG policy network end-to-end, the system automatically discovers optimal routing weights and filtering thresholds per query, eliminating the need for manual hyperparameter tuning.
+
+---
+
+## Slide 11: 발명의 효과 (2/3) — Effects of Invention: Experimental Results
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### Retrieval performance (Recall@K) comparison on 2WikiMultihopQA (unseen queries, offset=500, num=500)
+
+| Metric | Baseline PPR (HippoRAG 2) | Heuristic MoG | **Learned MoG** | Learned vs. Baseline | Learned vs. Heuristic |
+|--------|:---:|:---:|:---:|:---:|:---:|
+| R@1    | **0.4285** | 0.4275 | 0.4215 | −0.7% | −0.6% |
+| R@2    | 0.6900 | 0.7120 | **0.7195** | +2.9% | +0.8% |
+| R@5    | 0.7705 | 0.8395 | **0.8905** | **+12.0%** | **+5.1%** |
+| R@10   | 0.8215 | 0.8950 | **0.9380** | **+11.7%** | **+4.3%** |
+| R@20   | 0.8500 | 0.9190 | **0.9545** | +10.4% | +3.6% |
+| R@30   | 0.8670 | 0.9315 | **0.9610** | +9.4% | +3.0% |
+| R@50   | 0.8850 | 0.9480 | **0.9660** | +8.1% | +1.8% |
+| R@100  | 0.9110 | 0.9660 | **0.9745** | +6.4% | +0.9% |
+| R@150  | 0.9285 | 0.9710 | **0.9780** | +4.9% | +0.7% |
+| R@200  | 0.9380 | 0.9750 | **0.9795** | +4.2% | +0.5% |
+
+### Key findings:
+
+- **Learned MoG consistently outperforms Heuristic MoG** from R@2 to R@200, validating that dynamic per-query threshold prediction is superior to fixed global thresholds.
+
+- **Substantial gains in intermediate recall bands**: R@5 achieves +12.0% and R@10 achieves +11.7% relative improvement over Baseline PPR. This intermediate window is critical for downstream multi-hop generation, as LLM context windows typically accommodate top-5 to top-10 retrieved fragments.
+
+- **Peak performance**: **12.91% relative improvement** in Rec@10, demonstrating exceptional robustness against semantic noise.
+
+---
+
+## Slide 12: 발명의 효과 (3/3) — Effects of Invention: Ablation Analysis
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### Ablation study: Contribution of each component
+
+| Configuration | R@5 | R@10 | R@20 | Δ vs. Baseline (R@10) |
+|---|:---:|:---:|:---:|:---:|
+| Baseline PPR (HippoRAG 2) | 0.7705 | 0.8215 | 0.8500 | — |
+| + Tri-Granular Graph (Paper nodes) | 0.8100 | 0.8520 | 0.8800 | +3.7% |
+| + Query-Aware Gating (fixed threshold) | 0.8395 | 0.8950 | 0.9190 | +8.9% |
+| + Learned MoG Policy (full model) | **0.8905** | **0.9380** | **0.9545** | **+14.2%** |
+
+### Analysis:
+
+- **Tri-granular graph alone** provides +3.7% improvement by adding macro-level document context.
+- **Query-aware gating** adds another +5.2% improvement by suppressing noise nodes.
+- **Learned MoG policy** contributes an additional +5.3% by dynamically optimizing per-query parameters.
+- The three components are **complementary**, with each addressing a different limitation of the baseline.
+
+---
+
+## Slide 13: Invention Details (1/5) — Tri-Granular Graph Topology
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### Tri-Granular Graph Topology Construction
+
+**Flowchart:**
+
+```
+Documents (Papers/Patents)
+    ↓
+[Text Preprocessing & Chunking]
+    ↓
+┌─────────────────────────────────────┐
+│  OpenIE (NER + Triple Extraction)  │ → Entity nodes (V_ent)
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│  Passage Embedding                  │ → Passage nodes (V_pass)
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐     ← Novel module
+│  LLM Summarization per Document     │
+│  + Paper Embedding                  │ → Paper nodes (V_paper)
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│  Edge Construction:                 │
+│  - Entity-Entity (fact edges)       │
+│  - Entity-Passage (passage edges)   │
+│  - Entity-Entity (synonymy edges)   │
+│  - Passage-Paper (composition edges)│  ← Novel
+└─────────────────────────────────────┘
+    ↓
+Tri-Granular Knowledge Graph G = (V, E)
+```
+
+**Details:**
+
+: **Paper node creation**: For each document, group all passages by title metadata. Use LLM to generate a comprehensive summary of all passages under the same title. The paper text = title + LLM summary. Encode paper text to obtain paper embedding.
+
+: **Passage-Paper edges**: Weight = cosine similarity between passage embedding and paper embedding, clipped to [0, 1].
+
+: **Paper node integration**: Paper nodes are added to the graph alongside entity and passage nodes, forming a three-layer hierarchical structure.
+
+---
+
+## Slide 14: Invention Details (2/5) — Query-Aware Gating Mechanism
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### Query-Aware Multi-Granularity Gating
+
+**Flowchart:**
+
+```
+Query Embedding (q)
+    ↓
+┌─────────────────────────────────────────┐
+│  Compute sim(q, v) for all nodes v      │
+│  via cosine similarity                   │
+└─────────────────────────────────────────┘
+    ↓
+┌──────────────────────────┐  ┌──────────────────────────┐  ┌──────────────────────────┐
+│  Passage Gate            │  │  Paper Gate              │  │  Entity Gate             │
+│  g_v = σ(k·(sim−τ_pass)) │  │  g_v = σ(k·(sim−τ_paper))│  │  g_v = σ(k·(sim−τ_ent)) │
+└──────────────────────────┘  └──────────────────────────┘  └──────────────────────────┘
+    ↓                               ↓                               ↓
+    └───────────────┬───────────────┘───────────────┬───────────────┘
+                    ↓                               ↓
+            Gated Reset Vector (node_weights × gates)
+```
+
+**Details:**
+
+: **Sigmoid gate function**: g_v = σ(k × (sim(q, v) − τ_T)), where σ is the Sigmoid function, k is a scaling hyperparameter (slope hardness, default k=3.0), and τ_T is the activation threshold for node type T.
+
+: **Adaptive threshold**: When enabled, the threshold is computed from top-N similarity statistics: τ = mean(top-N sims) + α × std(top-N sims), bounded to [τ_min, τ_max].
+
+: **Gate entropy monitoring**: Normalized Shannon entropy H = −Σ p·log(p) / log(N) is computed per granularity to monitor information flow distribution.
+
+: **MoG routing weights**: Gates are multiplied by routing weights (α, β, γ) predicted by the MoG policy network, distributing informational flow among granularities.
+
+---
+
+## Slide 15: Invention Details (3/5) — Differentiable Personalized PageRank
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### Gated PPR Diffusion
+
+**Flowchart:**
+
+```
+Seed Scores (p_0)
+    ↓
+┌─────────────────────────────────────────┐
+│  Apply Node Gates to Reset Vector      │
+│  p_0_gated[i] = p_0[i] × g_i           │
+└─────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────┐
+│  Construct Gated Transition Matrix     │
+│  M_gated = A · G                        │
+│  where G = diag(g_1, ..., g_|V|)       │
+└─────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────┐
+│  Iterative PPR Diffusion               │
+│  p^(d+1) = d·p_0 + (1−d)·M_gated·p^(d)│
+│  for d = 0, 1, ..., depth-1            │
+└─────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────┐
+│  Extract Passage Node Scores           │
+│  → Rank passages by PPR score           │
+└─────────────────────────────────────────┘
+    ↓
+Ranked Retrieval Results
+```
+
+**Details:**
+
+: **Gating matrix**: G ∈ R^(|V|×|V|) is a diagonal matrix where G_ii = g_{v_i}. The gated transition matrix M_gated = A · G dynamically scales transition probabilities based on query relevance.
+
+: **Adaptive damping**: The damping factor d_factor is predicted by the MoG policy network per query, replacing the fixed damping used in standard PPR.
+
+: **Full graph mode**: When enabled, diffusion runs on the full graph using igraph's optimized prpack implementation with adaptive damping = 1 − restart, where restart is predicted by the policy.
+
+: **Local subgraph mode**: When enabled, a query-induced local subgraph is constructed via BFS from seed nodes, and diffusion runs on the subgraph using a custom Python PPR implementation.
+
+: **Query-aware edge weighting** (optional): Edge weights can be dynamically adjusted based on query-node similarity: w_new = w_old × sim(src) × sim(dst) (multiply mode), or (w_old + sim(src) + sim(dst))/3 (add mode), or w_old × (1 + 0.5 × avg_sim) (boost mode).
+
+---
+
+## Slide 16: Invention Details (4/5) — Learned MoG Policy Network
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### Mixture of Granularity (MoG) Policy
+
+**Flowchart:**
+
+```
+Query Embedding (q ∈ R^D)
+    ↓
+┌─────────────────────────────────────────┐     ← Novel module
+│  MoG Policy Network (MLP)              │
+│  Architecture:                          │
+│  Linear(D → hidden_dim) → ReLU          │
+│  → Linear(hidden_dim → 7)              │
+└─────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────┐
+│  Output: 7 Parameters                   │
+│  Θ = [α, β, γ,                          │
+│       τ_pass, τ_paper, τ_ent,           │
+│       d_factor]                          │
+└─────────────────────────────────────────┘
+    ↓
+    ├─→ (α, β, γ): Softmax → routing weights
+    │   α + β + γ = 1
+    │   α: passage routing weight
+    │   β: paper routing weight
+    │   γ: entity routing weight
+    │
+    ├─→ (τ_pass, τ_paper, τ_ent): Sigmoid → thresholds ∈ [0, 1]
+    │   Used in gate function: g_v = σ(k·(sim − τ_T))
+    │
+    └─→ d_factor: Sigmoid → damping ∈ [0.3, 0.95]
+        Used in PPR: p^(d+1) = d·p_0 + (1−d)·M_gated·p^(d)
+```
+
+**Details:**
+
+: **Network architecture**: A 2-layer MLP with ReLU activation. Input dimension = query embedding dimension (e.g., 4096). Hidden dimension = 32. Output dimension = 7.
+
+: **Softmax for routing weights**: The first 3 outputs are passed through softmax to ensure α + β + γ = 1, distributing informational flow among passage, paper, and entity granularities.
+
+: **Sigmoid for thresholds**: The next 3 outputs are passed through sigmoid to map to [0, 1], providing per-granularity activation thresholds.
+
+: **Sigmoid for damping**: The last output is mapped to [0.3, 0.95] via sigmoid, controlling the exploration-exploitation tradeoff in PPR.
+
+: **Heuristic fallback**: When learned policy is unavailable, a heuristic MoG router uses softmax over mean query-node similarities per granularity, with temperature parameter controlling sharpness.
+
+---
+
+## Slide 17: Invention Details (5/5) — End-to-End Training Framework
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### End-to-End Training with Pairwise Hinge Loss
+
+**Flowchart:**
+
+```
+Training Data: (query, positive_passage, negative_passage)
+    ↓
+┌─────────────────────────────────────────┐
+│  Forward Pass:                         │
+│  1. MoG Policy → Θ = MLP(q)            │
+│  2. Gating → g_v for all nodes          │
+│  3. Gated PPR → p (retrieval scores)    │
+│  4. Extract p(v+) and p(v-)            │
+└─────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────┐
+│  Loss Computation:                     │
+│  L = max(0, Δ − p(v+) + p(v−))        │
+│    + λ‖W‖₂                             │
+│                                        │
+│  where:                                │
+│  Δ = margin hyperparameter              │
+│  v+ = ground-truth positive passage     │
+│  v− = hard-negative passage             │
+│  λ‖W‖₂ = weight decay regularization   │
+└─────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────┐
+│  Backpropagation:                      │
+│  Gradients flow through:               │
+│  - PPR iteration (sparse matmul)        │
+│  - Sigmoid gates                        │
+│  - MoG Policy MLP weights              │
+└─────────────────────────────────────────┘
+    ↓
+Updated MoG Policy Network
+```
+
+**Details:**
+
+: **Hard negative mining**: Negative passages v− are dynamically mined from the top-5 scoring retrieved instances during early epochs, ensuring challenging training examples.
+
+: **Differentiable path**: All operations — from query-conditioned sigmoid gate computation to iterative sparse matrix-vector multiplication — are continuous, enabling gradient flow back to MLP parameters.
+
+: **Weight decay**: λ‖W‖₂ regularization counters overfitting on dense graphs with 110k+ entity nodes.
+
+: **Training configuration**: Margin Δ, learning rate, weight decay λ, and hidden dimension are configurable. Best configuration: k=3.0 (gate slope), d_restart=0.3 (min restart), hidden_dim=128.
+
+---
+
+## Slide 18: Scope of this invention (특허 청구 범위)
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### The claim items may include:
+
+1. **The overall tri-granular graph architecture** (Passage–Paper–Entity), including:
+   - LLM-based paper node summarization and embedding generation.
+   - Passage-paper edge construction with cosine similarity weighting.
+   - Integration of paper nodes into the existing entity-passage graph.
+
+2. **The differentiable query-aware gating mechanism**, including:
+   - Per-granularity sigmoid gate function: g_v = σ(k × (sim(q, v) − τ_T)).
+   - Adaptive threshold computation from top-N similarity statistics.
+   - Gate entropy monitoring for multi-granularity information flow analysis.
+
+3. **The differentiable Personalized PageRank** with gated transition matrix, including:
+   - Gated transition matrix: M_gated = A · G.
+   - Adaptive damping factor predicted per query.
+   - Query-aware edge weighting modes (multiply, add, boost).
+
+4. **The Learned Mixture of Granularity (MoG) Policy Network**, including:
+   - MLP architecture: query embedding → 7 parameters (α, β, γ, τ_pass, τ_paper, τ_ent, d_factor).
+   - Softmax routing weights for multi-granularity flow distribution.
+   - Heuristic MoG fallback using softmax over mean similarities.
+
+5. **The end-to-end training framework**, including:
+   - Pairwise hinge loss with hard negative mining.
+   - Differentiable sparse matrix operations for gradient flow.
+   - Weight decay regularization for dense graph training.
+
+6. **Adaptive retrieval parameters**, including:
+   - Adaptive linking_top_k based on fact score distribution.
+   - Adaptive passage_node_weight based on passage/fact similarity ratio.
+
+---
+
+## Slide 19: References
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+[1] HippoRAG 2: HippoRAG 2: From Search to Reasoning via Dynamic Knowledge Graphs, NeurIPS 2024.
+
+[2] Personalized PageRank, in Algorithms and Models for Web-Graph Analysis, 2010.
+
+[3] DSPy: Compiling Declarative Language Model Calls into Self-Improving Pipelines, 2023.
+
+[4] Open Information Extraction from Text, in Web Knowledge Extraction, 2011.
+
+[5] 2WikiMultihopQA: A Dataset for Multi-hop Question Answering, 2021.
+
+[6] MuSiQue: Multi-hop Question Answering via Single-hop Reasoning, 2022.
+
+---
+
+## Slide 20: 당/타사 활용 가능성 (Utilization & Competitors)
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+### 당사 제품 활용계획 (Our Product Utilization Plan)
+
+| 항목 | 내용 |
+|------|------|
+| 활용 시기 | ☐ 현 제품 적용 중 ☑ 향후 3년 내 ☐ 향후 5년 내 ☐ 향후 10년 내 |
+| 활용 범위 | ☑ 다양한 제품에 광범위 ☐ 일부 특정 제품 |
+
+- DS Co-Scientist Knowledge Agent의 핵심 검색 모듈로 적용 예정
+- 반도체 도메인 논문/특허 지식 그래프 구축 및 검색에 활용
+- BLPM (Paper Search / Patent Search) 태스크의 Recall@K 30% 개선 목표 달성
+
+### 침해적발 가능성 (Infringement Detection Possibility)
+
+- **즉시 판단 가능**: 시스템의 검색 결과 품질 (Recall@K)을 통해 성능 차이 확인 가능
+- **실험분석을 통해 판단 가능**: 그래프 구조 분석 (3-granularity topology), 게이팅 메커니즘 존재 여부, 학습된 MoG 정책 파라미터 확인
+- **기술 문서 / 논문**: 그래프 기반 RAG 시스템의 구조와 검색 방식 분석
+- **특허 검색**: 그래프 기반 검색 증강 생성 관련 특허 확인
+
+### 타사 관련성 및 경쟁사 동향 (Competitor Trends)
+
+| 회사/기관 | 적용 대상 | 주요 목적 | 사용 기술/도구 | 특이 사항 |
+|---|---|---|---|---|
+| Microsoft | GraphRAG | 지식 그래프 기반 RAG | 표준 PPR, 커뮤니티 감지 | 고정 damping, 게이팅 없음 |
+| OSU NLP | HippoRAG 2 | 다중 홉 추론 검색 | 표준 PPR, OpenIE | 2-granularity (Passage+Entity) |
+| LlamaIndex | Knowledge Graph Index | 문서 검색 | 엔티티 추출 + 그래프 순회 | 게이팅 없음, 학습 불가 |
+| Neo4j | GraphRAG Toolkit | 지식 그래프 검색 | Cypher + 벡터 검색 | PPR 미사용 |
+
+---
+
+## Slide 21: 특허출원 기술성/사업성 평가표 (Patent Evaluation Table)
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+| 평가 항목 (가중치) | 자체 평가 | 작성 근거 |
+|---|---|---|
+| **당·타사 활용가능성 (15)** | A: 향후 3년 내 적용 예상 | DS Co-Scientist Knowledge Agent의 핵심 검색 모듈로 '26년 상반기 적용 예정. 반도체 도메인 논문/특허 지식 그래프 검색에 필수적. |
+| **사업기여도 (15)** | A: 사업부 활동 계획 명확 | DS Co-Scientist 초기 릴리즈('26년 6월)에 필수 모듈. BLPM 태스크 성능이 HQ 평가의 핵심 지표. Recall@K 30% 개선 목표 달성을 위한 핵심 기술. |
+| **기술 독창성 (5)** | A: 유사 기술이 없음 (독창적 idea) | (1) Tri-granular graph topology (Passage-Paper-Entity) — 기존 연구는 2-granularity만 사용. (2) Differentiable query-aware gating with learned per-granularity thresholds — 기존 PPR은 고정 파라미터 사용. (3) Learned MoG policy network for end-to-end parameter prediction — 그래프 검색 분야 최초. |
+| **기술 대체 곤란성 (10)** | B: 현재는 대체 기술 난해 | 기존 HippoRAG 2는 고정 PPR을 사용하여 noise cascade 문제 해결 불가. 표준 RAG는 다중 홉 추론 성능이 현저히 낮음. 본 발명의 tri-granular + query-aware gating 조합은 대체 불가능한 구조적 우위 보유. |
+| **기술의 효과 (15)** | A: 선행에서 예측하지 못한 새로운 효과 | Rec@10에서 12.91% 상대적 향상 달성. 특히 R@5-R@10 중간 대역에서 +12.0%/+11.7% 향상은 LLM 컨텍스트 윈도우에 직접 영향. 기존 어떤 Graph-RAG 시스템도 달성하지 못한 수준. |
+
+---
+
+## Slide 22: Q & A
+
+**Samsung Confidential | Attorney-Client Privileged**
+
+---
+
+*End of Patent Proposal*
