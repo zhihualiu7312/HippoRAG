@@ -1,0 +1,36 @@
+## 分析结果：Gating 操作的范围 — 对**所有 node**，不是只对 seed node
+
+### 1. Gate 计算范围（`hipporag_extensions.py` `from_query_embedding`）
+
+Gate 的计算覆盖**图中所有节点**，而非仅 seed 节点：
+
+```python
+# passage_node_idxs = 图中所有 passage 节点的索引（不是 seed）
+for idx, emb in zip(passage_node_idxs, passage_embeddings):
+    sim = float(np.dot(q, v / v_norm))
+    gate = 1.0 / (1.0 + np.exp(-node_gate_k * (sim - effective_threshold)))
+    node_gates[idx] = gate    # ← 对每个 passage 节点都计算 gate
+```
+
+同理，entity 和 paper 也是遍历**全部节点**计算 gate。`passage_node_idxs`、`entity_node_idxs`、`paper_node_idxs` 是图中该类型的所有节点索引，不是检索的 seed。
+
+### 2. Gate 应用范围（`HippoRAG.py` `run_ppr`，第 2273-2278 行）
+
+Gate 被应用到 **PPR 的 reset vector（personalization vector）** 上，影响所有节点：
+
+```python
+gated_reset_prob = reset_prob.copy()       # reset_prob 长度 = 图中所有节点数
+if policy.node_gates:
+    for node_idx, gate in policy.node_gates.items():
+        if 0 <= node_idx < len(gated_reset_prob):
+            gated_reset_prob[node_idx] *= gate   # ← 对 reset vector 中的每个有 gate 的节点乘以 gate
+```
+
+然后传入 igraph PPR：
+```python
+pagerank_scores = self.graph.personalized_pagerank(
+    ...,
+    reset=gated_reset_prob,   # ← 整个 reset vector 被 gate 调制
+    implementation='prpack'
+)
+```
