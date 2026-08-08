@@ -1,0 +1,40 @@
+Input:  query q, knowledge graph G = (V, E), trained MLP policy π_θ
+Output: ranked passage list R
+
+1.  q_emb ← Embed(q)                          // query embedding
+
+2.  // --- MLP predicts 10 parameters ---
+3.  Θ ← π_θ(q_emb)                            // Θ ∈ R^10
+4.  (α, β, γ) ← softmax(Θ[1:3])               // routing weights
+5.  (τ_pass, τ_paper, τ_ent) ← sigmoid(Θ[4:6]) // gate thresholds
+6.  (k_pass, k_paper, k_ent) ← 1 + 19·sigmoid(Θ[7:9])  // gate slopes
+7.  d ← 0.3 + 0.65·sigmoid(Θ[10])             // PPR damping
+
+8.  // --- Fact retrieval + reranking (same as HippoRAG) ---
+9.  S ← FactRetrieval(q, G)
+10. S ← Rerank(q, S)
+11. r ← BuildResetVector(S, |V|)              // r ∈ R^|V|
+
+12. // --- Compute per-node gated values ---
+13. for each node v ∈ V do
+14.     sim ← cos(q_emb, e_v)                 // cosine similarity
+15.     T ← NodeType(v)                       // entity / passage / paper
+16.     g_v ← σ(k_T · (sim - τ_T))            // sigmoid gate
+17.     g_v ← g_v · w_T                        // multiply routing weight
+18. end for
+
+19. // --- Apply gates to reset vector ---
+20. r_gated ← r ⊙ g                           // element-wise: r_gated[v] = r[v] · g_v
+
+21. // --- Run PPR (igraph prpack) ---
+22. p ← igraph.PersonalizedPageRank(
+23.     graph = G,
+24.     reset = r_gated,
+25.     damping = d
+26. )
+
+27. // --- Rank passage nodes ---
+28. R ← TopK({(v, p[v]) : v ∈ V, NodeType(v) = passage}, k)
+
+29. return R
+─────────────────────────────────────────────────────────────────
