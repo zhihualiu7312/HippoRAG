@@ -1,3 +1,14 @@
+| 符号        | 含义                                   |
+| --------- | ------------------------------------ |
+| (q)       | query                                |
+| (G=(V,E)) | graph                                |
+| (r)       | initial reset/personalization vector |
+| (g_q)     | query-dependent node gate            |
+| (r_q)     | gated personalization vector         |
+| (M)       | graph propagation matrix             |
+| (s^{(t)}) | PPR score vector at iteration (t)    |
+| (p_q)     | final PPR score vector               |
+| (d_q)     | query-adaptive damping               |
 
 # 三个问题的代码分析
 
