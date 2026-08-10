@@ -1,0 +1,130 @@
+
+# 三个问题的代码分析
+
+## 问题 1: PPR matrix orientation
+
+### PyTorch differentiable PPR (训练时)
+
+`train_mog_policy.py` 第 255 行:
+```python
+indices = torch.stack([dst_both, src_both])  # (row, col) for M @ v
+M = torch.sparse_coo_tensor(indices, w_norm, (n, n))
+```
+
+矩阵 M 的构造方式：`indices = [dst, src]`，即 `M[dst, src] = weight`。这意味着 **M 是按列归一化的**（column-normalized），因为行归一化是对 `src_both`（源节点）做的：
+```python
+out_deg = torch.zeros(n)
+out_deg.scatter_add_(0, src_both, w_both)   # 按 src 累加 = out-degree
+w_norm = w_both / out_deg[src_both]           # 每条边除以源节点的出度
+```
+
+然后 PPR 迭代为：
+```python
+propagated = torch.sparse.mm(M_sparse, gated.unsqueeze(1))  # M @ (scores * gates)
+```
+
+这里 `M @ v` 中 M 的行索引是 `dst`，列索引是 `src`。所以 `M[dst, src] = w / out_deg[src]`，即 **信息从 src 流向 dst**，每条边的权重是 `1/out_degree(src)`。这是标准的 **row-normalized adjacency**（行归一化邻接矩阵），`M @ v` 表示从源节点传播到目标节点。
+
+### igraph PPR (推理时)
+
+igraph 的 `personalized_pagerank` 使用 `directed=False`，即无向图。igraph 内部使用 prpack 实现，其矩阵方向是 **row-normalized**（行归一化）。
+
+### 结论
+✅ **矩阵方向一致**：PyTorch 和 igraph 都使用 row-normalized adjacency，信息从源节点流向目标节点。
+
+---
+
+## 问题 2: Gate 作用于 reset 还是 transition
+
+### 训练时 (PyTorch differentiable PPR)
+
+`train_mog_policy.py` 第 288-292 行:
+```python
+for _ in range(depth):
+    gated = scores * gates              # ← gate 作用于 scores（即 PPR 分数）
+    propagated = torch.sparse.mm(M_sparse, gated.unsqueeze(1))
+    scores = damping * seeds_vec + (1.0 - damping) * propagated
+```
+
+**gate 作用于 transition**：每步迭代中，`scores * gates` 先对当前 PPR 分数施加 gate，然后再做矩阵乘法传播。gate 在 **每步迭代中都作用**，持续抑制不相关节点的信号。
+
+### 推理时 (igraph PPR)
+
+`HippoRAG.py` 中:
+```python
+gated_reset_prob = reset_prob
+if policy.node_gates:
+    gated_reset_prob = reset_prob.copy()
+    for node_idx, gate in policy.node_gates.items():
+        if 0 <= node_idx < len(gated_reset_prob):
+            gated_reset_prob[node_idx] *= gate   # ← gate 作用于 reset vector
+
+pagerank_scores = self.graph.personalized_pagerank(
+    reset=gated_reset_prob,   # ← 只修改 reset，不修改 transition
+    damping=adaptive_damping,
+    ...
+)
+```
+
+**gate 作用于 reset**：推理时 gate 只乘到 reset vector 上一次，不进入 igraph 的内部迭代。
+
+### 结论
+⚠️ **不一致！**
+
+| | 训练 (PyTorch) | 推理 (igraph) |
+|---|---|---|
+| gate 作用对象 | **transition**（每步 `scores * gates`） | **reset**（仅 `reset * gates` 一次） |
+| gate 作用频率 | 每步迭代 | 仅一次 |
+| 效果 | 持续抑制不相关节点 | 仅降低 seed 节点的初始权重 |
+
+**这是一个 train-test mismatch**：训练时 gate 在 PPR 迭代中持续作用（每步都乘），推理时 gate 只在 reset vector 上作用一次。这意味着训练和推理的 PPR 行为不同，可能导致学到的参数在推理时不是最优的。
+
+---
+
+## 问题 3: PyTorch PPR 和 igraph PPR 是否一致
+
+### 公式对比
+
+**PyTorch (训练)**:
+```
+scores = damping * seeds + (1 - damping) * M @ (scores * gates)
+```
+- gate 在每步迭代中作用于 scores
+- damping = learned damping (0.3~0.95)
+
+**igraph (推理)**:
+```
+igraph.personalized_pagerank(reset=gated_reset_prob, damping=adaptive_damping)
+```
+- gate 仅作用于 reset vector（一次）
+- adaptive_damping = 1.0 - policy.restart
+
+### damping 参数映射
+
+```python
+# MoGPolicy.predict():
+damping = 0.3 + 0.65 * damping_raw      # damping ∈ [0.3, 0.95]
+restart = 1.0 - damping                   # restart ∈ [0.05, 0.7]
+
+# 推理时:
+adaptive_damping = 1.0 - policy.restart   # = damping（回到原值）
+```
+
+✅ damping 参数映射一致。
+
+### 不一致点
+
+| 方面 | PyTorch | igraph | 一致？ |
+|------|---------|--------|--------|
+| damping | learned [0.3, 0.95] | 1 - restart = damping | ✅ |
+| gate 作用 | 每步 `scores * gates` | 仅 reset 一次 | ❌ |
+| 图结构 | 对称化（双向边） | `directed=False` | ✅ |
+| 权重归一化 | row-normalized | igraph 内部 | ✅ |
+| 迭代深度 | depth=10 (固定) | prpack 收敛 | ⚠️ 近似 |
+
+### 结论
+⚠️ **不完全一致**。主要差异在 gate 的作用方式：
+- 训练：gate 在每步 PPR 迭代中持续作用（`scores * gates`），形成持续的节点级过滤
+- 推理：gate 仅在 reset vector 上作用一次，igraph 内部迭代不应用 gate
+
+这意味着训练时学到的 gate 参数（τ, k）是在"持续过滤"假设下优化的，但推理时只做"一次性过滤"，可能导致性能差异。
