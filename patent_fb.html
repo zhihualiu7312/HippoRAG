@@ -1,0 +1,907 @@
+# QG-PPR: Query-Conditioned Gated PPR for Multi-Granular Graph Retrieval
+
+## 1. 요지
+
+**QG-PPR (Query-Conditioned Gated Personalized PageRank)** discloses a query-conditioned graph retrieval method that dynamically controls both **relevance injection** and **graph propagation** in Personalized PageRank (PPR) over a multi-granular knowledge graph.
+
+Instead of applying a fixed PPR diffusion strategy to all queries, QG-PPR uses a lightweight learned policy network conditioned on the query embedding to generate query-specific retrieval parameters. The policy controls granularity-aware routing weights, node-level selectivity parameters, and diffusion persistence, thereby allowing different queries to follow different graph retrieval strategies.
+
+The core technical contribution is the decomposition of query-conditioned PPR control into two complementary mechanisms:
+
+1. **Query-Conditioned Relevance Injection:** query-dependent gates and granularity routing weights regulate how much relevance mass is injected into entity, passage, and paper nodes at initialization.
+2. **Query-Conditioned Propagation:** the same query-conditioned gating mechanism regulates the propagation of relevance through the graph, continuously suppressing irrelevant nodes and diffusion paths.
+
+These two mechanisms can be used independently or jointly, resulting in the following retrieval variants:
+
+* **M0 — Vanilla PPR:** fixed PPR without query-conditioned gating.
+* **M1 — Query-Conditioned Injection:** adaptive personalization/relevance injection without adaptive propagation.
+* **M2 — Query-Conditioned Propagation:** adaptive propagation gating without adaptive personalization.
+* **M3 — QG-PPR:** joint query-conditioned relevance injection and propagation gating.
+
+The complete QG-PPR model corresponds to M3 and jointly learns **where relevance should enter the graph and how relevance should propagate through the graph**.
+
+---
+
+# 2. 확보 가능한 권리 범위
+
+### Claim 1 — Query-conditioned multi-granular graph retrieval
+
+A graph-based retrieval method comprising:
+
+1. constructing or receiving a multi-granular knowledge graph containing at least entity, passage, and document-level nodes;
+2. receiving a query and generating a query embedding;
+3. computing query-conditioned relevance signals between the query embedding and graph nodes;
+4. generating a query-conditioned personalization vector for PPR;
+5. performing personalized graph diffusion over the knowledge graph; and
+6. ranking passage nodes according to the resulting PPR scores.
+
+### Claim 2 — Query-conditioned learned policy
+
+The method of Claim 1, wherein a learned policy network receives the query embedding and predicts a plurality of retrieval-control parameters, including one or more of:
+
+* granularity-specific routing weights;
+* node-type-specific gate thresholds;
+* node-type-specific gate slopes;
+* diffusion damping or persistence parameters; and
+* other query-conditioned graph diffusion parameters.
+
+The learned policy thereby replaces fixed retrieval parameters with query-conditioned parameters.
+
+### Claim 3 — Multi-granularity query-conditioned gating
+
+The method of Claim 1, wherein graph nodes are divided into multiple semantic granularities, including entity, passage, and paper/document nodes, and an independent query-conditioned sigmoid gate is calculated for each node according to its granularity:
+
+[
+g_v(q)
+======
+
+\sigma
+\left(
+k_{T(v)}(q)
+\left[
+s(q,v)-\tau_{T(v)}(q)
+\right]
+\right),
+]
+
+where:
+
+* (s(q,v)) denotes query-node relevance;
+* (T(v)) denotes the node granularity;
+* (\tau_{T(v)}(q)) denotes a query-conditioned threshold; and
+* (k_{T(v)}(q)) denotes a query-conditioned gate slope.
+
+### Claim 4 — Query-conditioned relevance injection
+
+The method of Claim 3, wherein the query-conditioned gate is applied to the initial PPR personalization/relevance distribution such that the initial relevance mass assigned to each node is modulated according to query-node relevance and node granularity.
+
+The resulting query-conditioned personalization vector is:
+
+[
+r_q(v)
+======
+
+r(v)\cdot
+w_{T(v)}(q)\cdot
+g_v(q),
+]
+
+where (r(v)) is the initial relevance mass, (w_{T(v)}(q)) is a learned granularity routing weight, and (g_v(q)) is the query-conditioned node gate.
+
+### Claim 5 — Query-conditioned propagation gating
+
+The method of Claim 3, wherein the query-conditioned node gate is additionally applied during PPR propagation so that relevance scores associated with irrelevant nodes are continuously attenuated during graph diffusion.
+
+A differentiable propagation step may be represented as:
+
+[
+p^{(t+1)}
+=========
+
+d_q r_q
++
+(1-d_q)
+M
+\left(
+p^{(t)}
+\odot
+g_q
+\right),
+]
+
+where:
+
+* (p^{(t)}) is the PPR relevance distribution at iteration (t);
+* (M) is the graph transition operator;
+* (g_q) is the vector of query-conditioned node gates;
+* (r_q) is the query-conditioned personalization vector; and
+* (d_q) is a query-conditioned damping/restart parameter.
+
+### Claim 6 — Joint relevance injection and propagation control
+
+The method of Claims 4 and 5, wherein query-conditioned relevance injection and query-conditioned propagation gating are jointly applied, thereby controlling both:
+
+* **where relevance enters the graph**, and
+* **where relevance is allowed to propagate**.
+
+This joint mechanism constitutes the complete QG-PPR retrieval framework.
+
+### Claim 7 — Differentiable graph diffusion
+
+The method of Claim 5, wherein graph diffusion is implemented using differentiable sparse matrix operations, enabling gradients to propagate through graph propagation, node gating, personalization, and policy parameters.
+
+### Claim 8 — Pairwise ranking optimization
+
+The method of Claim 7, wherein the query-conditioned policy is trained using a pairwise ranking objective that encourages the PPR score of a ground-truth passage to exceed the score of a hard negative passage by a predefined margin:
+
+[
+\mathcal{L}
+===========
+
+\max
+\left(
+0,
+\Delta
+------
+
+p_q(v^+)
++
+p_q(v^-)
+\right).
+]
+
+Hard negatives may be selected from high-ranked non-ground-truth passages produced by an initial retrieval system.
+
+---
+
+# 3. 출원 사유
+
+Conventional graph-based retrieval systems commonly apply a fixed graph diffusion strategy across different queries. Although Personalized PageRank provides a mechanism for query-dependent personalization, its propagation behavior is generally governed by fixed graph transition rules and manually selected diffusion parameters.
+
+QG-PPR addresses this limitation by introducing **query-conditioned control over both relevance injection and relevance propagation**.
+
+The key idea is that different queries may require different graph retrieval behaviors. For example, one query may primarily require passage-level evidence, while another may require document-level or entity-level intermediate reasoning. Likewise, some queries may benefit from broader graph diffusion, whereas others require aggressive suppression of irrelevant high-degree nodes.
+
+QG-PPR therefore learns a retrieval policy conditioned on the query rather than applying a single fixed diffusion configuration to all queries.
+
+---
+
+# 4. 선행 기술과의 차이점
+
+| Aspect              | Conventional / Vanilla PPR                        | QG-PPR                                         |
+| ------------------- | ------------------------------------------------- | ---------------------------------------------- |
+| Query conditioning  | Mainly used for initial personalization           | Used to control both injection and propagation |
+| Personalization     | Fixed retrieval construction                      | Query-conditioned relevance injection          |
+| Node filtering      | No query-conditioned filtering                    | Node- and granularity-specific sigmoid gating  |
+| Propagation         | Uniform graph diffusion                           | Query-conditioned gated diffusion              |
+| Granularity routing | Fixed or uniform                                  | Query-conditioned routing weights              |
+| Gate parameters     | Fixed/manual or absent                            | Query-conditioned thresholds and slopes        |
+| Damping             | Fixed or globally selected                        | Query-conditioned diffusion persistence        |
+| Noise suppression   | No explicit propagation control                   | Continuous suppression of irrelevant diffusion |
+| Training            | Retrieval and diffusion often separately designed | Differentiable policy optimization through PPR |
+| Retrieval policy    | Same diffusion strategy for different queries     | Query-specific graph retrieval strategy        |
+
+The fundamental distinction is therefore not merely the introduction of a learned PPR parameter, but the introduction of a **query-conditioned control mechanism over both relevance injection and graph propagation**.
+
+---
+
+# 5. Patent Technology Domain
+
+QG-PPR belongs to the field of:
+
+> **Graph-based information retrieval using query-conditioned Personalized PageRank and multi-granular knowledge graphs.**
+
+The technology is particularly applicable to GraphRAG and multi-hop retrieval systems in which relevant evidence may be distributed across heterogeneous graph nodes.
+
+The invention introduces a **Query-Conditioned Gated PPR framework** in which a learned policy transforms a query embedding into a retrieval-specific diffusion strategy.
+
+The policy can dynamically determine:
+
+* which graph granularities should receive greater relevance;
+* which nodes should contribute strongly to graph diffusion;
+* which nodes should be suppressed;
+* how aggressively relevance should propagate; and
+* how much diffusion persistence should be used for the current query.
+
+This converts PPR from a largely fixed graph diffusion mechanism into a **query-conditioned retrieval policy**.
+
+---
+
+# 6. Motivation — Why QG-PPR?
+
+## Problem 1: Fixed graph diffusion
+
+Graph-based retrieval systems such as PPR-based GraphRAG methods can propagate relevance through multiple hops of a knowledge graph. However, a fixed propagation strategy may indiscriminately transmit relevance through both useful and irrelevant nodes.
+
+This is particularly problematic in dense knowledge graphs containing:
+
+* high-degree entities;
+* semantically related but answer-irrelevant passages;
+* documents sharing common terminology;
+* noisy cross-document connections; and
+* heterogeneous relations across multiple semantic granularities.
+
+As diffusion proceeds, irrelevant relevance can cascade through the graph and eventually dominate the top-ranked passages.
+
+---
+
+## Problem 2: Query-independent propagation behavior
+
+Different queries require different retrieval behaviors.
+
+For example:
+
+* a highly specific process query may require narrow diffusion around a small number of relevant entities;
+* a document-level literature query may benefit from broader propagation through paper-level nodes;
+* a cross-document technical query may require entity-to-paper-to-passage diffusion.
+
+A single fixed PPR configuration cannot optimally represent these different retrieval requirements.
+
+---
+
+## Problem 3: Multi-granular graph noise
+
+A multi-granular graph contains different types of nodes with substantially different semantic roles.
+
+For example:
+
+[
+\text{Entity}
+\rightarrow
+\text{Passage}
+\rightarrow
+\text{Paper}
+\rightarrow
+\text{Passage}.
+]
+
+The importance of each granularity depends on the query.
+
+A query about a specific process chemistry may require strong entity-level signals, while a query concerning a broader technology trend may benefit from paper-level evidence.
+
+QG-PPR therefore learns query-conditioned granularity routing instead of assuming equal importance among node types.
+
+---
+
+# 7. Summary of the Invention
+
+The present invention discloses a **Query-Conditioned Gated Personalized PageRank (QG-PPR)** method and system for multi-granular graph retrieval.
+
+The core idea is:
+
+> **Replace fixed graph diffusion with a query-conditioned retrieval policy that controls both relevance injection and relevance propagation.**
+
+The invention consists of four principal components.
+
+### 7.1 Multi-Granular Knowledge Graph
+
+The graph contains heterogeneous semantic granularities, including:
+
+* entity nodes;
+* passage nodes; and
+* paper/document nodes.
+
+Paper-level nodes provide document-level structural anchors that connect semantically related passages within the same document.
+
+This enables retrieval to reason across multiple semantic scales rather than relying exclusively on passage-level or entity-level connections.
+
+---
+
+### 7.2 Query-Conditioned Granularity Routing
+
+A lightweight policy network receives the query embedding:
+
+[
+q_e = \operatorname{Embed}(q)
+]
+
+and predicts granularity-specific routing weights:
+
+[
+\mathbf{w}(q)
+=============
+
+[
+\alpha(q),
+\beta(q),
+\gamma(q)
+].
+]
+
+The weights are normalized using softmax:
+
+[
+\mathbf{w}(q)
+=============
+
+\operatorname{softmax}
+(
+\Theta_{1:3}
+).
+]
+
+These weights determine how strongly entity, passage, and paper nodes contribute to the query-conditioned retrieval process.
+
+Thus, different queries can dynamically emphasize different graph granularities.
+
+---
+
+### 7.3 Query-Conditioned Node Gating
+
+For every graph node (v), the system computes query-node similarity:
+
+[
+s(q,v)
+======
+
+\cos(e_q,e_v).
+]
+
+A node-type-specific sigmoid gate is then calculated:
+
+[
+g_v(q)
+======
+
+\sigma
+\left(
+k_{T(v)}(q)
+[
+s(q,v)-\tau_{T(v)}(q)
+]
+\right).
+]
+
+The gate provides a soft relevance filter.
+
+Unlike hard filtering, the mechanism does not remove graph nodes. Instead, it continuously scales their contribution according to their relevance to the current query.
+
+This allows the model to suppress irrelevant nodes while retaining potentially useful weak signals.
+
+---
+
+# 8. Query-Conditioned Relevance Injection
+
+The first role of the gate is to control **where relevance enters the graph**.
+
+Given an initial personalization vector (r), QG-PPR constructs:
+
+[
+r_q(v)
+======
+
+r(v)
+\cdot
+w_{T(v)}(q)
+\cdot
+g_v(q).
+]
+
+Consequently, the initial relevance distribution is different for different queries.
+
+A query emphasizing entity-level reasoning can produce a large entity contribution, whereas another query can assign greater relevance to paper or passage nodes.
+
+This mechanism corresponds to **M1 — Query-Conditioned Injection**.
+
+The key property is:
+
+> **M1 learns where to start graph diffusion.**
+
+---
+
+# 9. Query-Conditioned Propagation
+
+The second role of the gate is to control **where relevance propagates**.
+
+During graph diffusion, the query-conditioned gate can modulate the current relevance distribution before propagation:
+
+[
+p^{(t+1)}
+=========
+
+d_q r_q
++
+(1-d_q)
+M
+(
+p^{(t)}
+\odot
+g_q
+).
+]
+
+Therefore, a node with low query relevance contributes less relevance to subsequent propagation.
+
+This prevents irrelevant nodes from repeatedly transmitting noisy relevance through multiple graph hops.
+
+This mechanism corresponds to **M2 — Query-Conditioned Propagation**.
+
+The key property is:
+
+> **M2 learns where to propagate.**
+
+---
+
+# 10. Joint QG-PPR
+
+The complete QG-PPR model combines both mechanisms:
+
+[
+\boxed{
+\text{Query-Conditioned Injection}
++
+\text{Query-Conditioned Propagation}
+}
+]
+
+The resulting model corresponds to **M3**.
+
+Conceptually:
+
+[
+\boxed{
+\text{Query}
+\rightarrow
+\text{Policy}
+\rightarrow
+\begin{cases}
+\text{Where to inject relevance}\
+\text{Where to propagate relevance}
+\end{cases}
+\rightarrow
+\text{PPR}
+\rightarrow
+\text{Passage Ranking}
+}
+]
+
+This allows the retrieval system to simultaneously control the initial relevance distribution and subsequent diffusion trajectory.
+
+---
+
+# 11. Query-Conditioned Diffusion Persistence
+
+The policy additionally predicts a query-conditioned PPR damping parameter:
+
+[
+d_q
+===
+
+d_{\min}
++
+(d_{\max}-d_{\min})
+\sigma(\theta_d).
+]
+
+The parameter controls the balance between query-conditioned relevance injection and graph propagation.
+
+A higher propagation persistence allows relevance to travel further through the graph, while a stronger restart component keeps retrieval closer to the query-conditioned initial relevance distribution.
+
+Thus, QG-PPR can dynamically adjust the effective diffusion behavior for different queries.
+
+---
+
+# 12. Differentiable QG-PPR Training
+
+To optimize the query-conditioned retrieval policy, PPR is implemented using differentiable sparse matrix operations.
+
+Let (M) denote the graph transition operator.
+
+The propagation process can be expressed as:
+
+[
+p^{(t+1)}
+=========
+
+d_q r_q
++
+(1-d_q)
+M
+(
+p^{(t)}
+\odot
+g_q
+).
+]
+
+Because the graph propagation and gating operations are differentiable, gradients can propagate from the final passage ranking objective back to:
+
+* routing weights;
+* gate thresholds;
+* gate slopes;
+* damping parameters; and
+* the policy network.
+
+This enables direct optimization of the query-conditioned retrieval policy.
+
+---
+
+# 13. Pairwise Ranking Objective
+
+For each query, a ground-truth passage (v^+) and a hard negative passage (v^-) are constructed.
+
+The policy is optimized using a pairwise hinge loss:
+
+[
+\mathcal{L}
+===========
+
+\max
+\left(
+0,
+\Delta
+------
+
+p_q(v^+)
++
+p_q(v^-)
+\right).
+]
+
+The objective directly encourages:
+
+[
+p_q(v^+)
+
+>
+
+p_q(v^-)+\Delta.
+]
+
+Hard negatives are selected from high-ranked non-ground-truth passages produced by the retrieval system.
+
+Such negatives are particularly useful because they are often semantically similar to the query but do not contain the required evidence.
+
+The policy is therefore trained to distinguish:
+
+> **semantically related nodes**
+
+from:
+
+> **retrieval-relevant nodes**.
+
+---
+
+# 14. Training Data Construction
+
+For each training query:
+
+### Positive node
+
+The positive node (v^+) corresponds to a ground-truth passage annotated as containing the required evidence.
+
+### Hard negative node
+
+A hard negative (v^-) is selected from highly ranked non-ground-truth passages.
+
+The training example is therefore:
+
+[
+(q,v^+,v^-).
+]
+
+The pairwise objective directly optimizes the relative PPR ranking of these passages.
+
+This design is particularly suitable for graph retrieval because the most difficult retrieval errors are often caused by nodes that are structurally or semantically close to the correct evidence.
+
+---
+
+# 15. Four-Model Decomposition
+
+QG-PPR can be decomposed into four experimentally distinguishable variants.
+
+| Model           | Relevance Injection | Propagation Gating | Description                       |
+| --------------- | ------------------: | -----------------: | --------------------------------- |
+| **M0**          |                   ✗ |                  ✗ | Vanilla PPR                       |
+| **M1**          |                   ✓ |                  ✗ | Query-Conditioned Injection       |
+| **M2**          |                   ✗ |                  ✓ | Query-Conditioned Propagation     |
+| **M3 / QG-PPR** |                   ✓ |                  ✓ | Joint Query-Conditioned Gated PPR |
+
+This decomposition isolates the contribution of each mechanism.
+
+The conceptual distinction can be summarized as:
+
+[
+\boxed{
+M1:\text{ learns where to start}
+}
+]
+
+[
+\boxed{
+M2:\text{ learns where to propagate}
+}
+]
+
+[
+\boxed{
+M3:\text{ learns both where to start and where to propagate}
+}
+]
+
+---
+
+# 16. Three Key Technical Effects
+
+## 16.1 Query-conditioned relevance allocation
+
+QG-PPR dynamically allocates relevance among different graph granularities according to the query.
+
+Therefore, the same graph can be traversed differently for different queries.
+
+---
+
+## 16.2 Query-conditioned noise suppression
+
+The sigmoid gate continuously attenuates relevance associated with low-query-relevance nodes.
+
+This reduces the likelihood that irrelevant nodes initiate or sustain multi-hop noise propagation.
+
+The mechanism is particularly important for top-K retrieval, where even a small number of highly ranked irrelevant passages can significantly affect downstream generation.
+
+---
+
+## 16.3 Joint injection and propagation control
+
+The strongest configuration combines both mechanisms.
+
+The empirical results demonstrate that the joint model provides substantially better recall than either mechanism alone.
+
+For example, the current experimental results show:
+
+[
+R@10:
+\quad
+M1=65.43%,
+\quad
+M2=69.80%,
+\quad
+M3=73.60%.
+]
+
+Thus, the joint mechanism improves over M1 by:
+
+[
++8.17
+]
+
+percentage points, and over M2 by:
+
+[
++3.80
+]
+
+percentage points at Recall@10.
+
+At Recall@20:
+
+[
+M1=72.87%,
+\quad
+M2=76.13%,
+\quad
+M3=79.73%.
+]
+
+At Recall@50:
+
+[
+M1=84.15%,
+\quad
+M2=84.93%,
+\quad
+M3=88.52%.
+]
+
+These results support the complementary roles of relevance injection and propagation control.
+
+---
+
+# 17. Difference from Conventional PPR-Based Retrieval
+
+Conventional PPR-based retrieval can be represented conceptually as:
+
+[
+q
+\rightarrow
+r
+\rightarrow
+PPR(G,r)
+\rightarrow
+Ranking.
+]
+
+The graph transition mechanism is largely independent of the query.
+
+QG-PPR instead performs:
+
+[
+q
+\rightarrow
+\pi_\theta(q)
+\rightarrow
+\begin{cases}
+r_q\
+g_q\
+d_q
+\end{cases}
+\rightarrow
+PPR(G,r_q,g_q,d_q)
+\rightarrow
+Ranking.
+]
+
+Therefore, QG-PPR changes the retrieval paradigm from:
+
+> **one fixed diffusion strategy for all queries**
+
+to:
+
+> **a query-specific graph diffusion strategy for each query.**
+
+---
+
+# 18. Semiconductor Enterprise Scenario
+
+QG-PPR is particularly applicable to private semiconductor knowledge graphs containing heterogeneous proprietary information, including:
+
+* equipment manuals;
+* process recipes;
+* process-development reports;
+* defect reports;
+* yield data;
+* experimental logs;
+* device characterization results;
+* simulation results;
+* internal technical reports; and
+* intellectual-property documents.
+
+Such information naturally forms a multi-granular knowledge structure involving:
+
+[
+\text{Entity}
+\rightarrow
+\text{Passage}
+\rightarrow
+\text{Document}
+\rightarrow
+\text{Entity}
+]
+
+and potentially additional relationships.
+
+For example, a semiconductor process query may require reasoning across:
+
+[
+\text{Etch chemistry}
+\rightarrow
+\text{Selectivity}
+\rightarrow
+\text{Material}
+\rightarrow
+\text{Process condition}
+\rightarrow
+\text{Experimental result}.
+]
+
+A fixed PPR strategy may propagate through common process entities and introduce large amounts of irrelevant evidence.
+
+QG-PPR can instead learn a query-specific propagation policy that emphasizes the graph regions most relevant to the query.
+
+---
+
+# 19. Example: Semiconductor Retrieval
+
+For a query such as:
+
+> “Identify process conditions that achieve high selectivity of Si over SiGe during plasma etching.”
+
+The graph may contain nodes representing:
+
+* Si;
+* SiGe;
+* HBr;
+* O₂;
+* Cl₂;
+* plasma etching;
+* selectivity;
+* process temperature;
+* RF power;
+* etch rate;
+* papers; and
+* experimental passages.
+
+A fixed PPR system may strongly propagate through common high-degree entities such as “silicon,” “etching,” or “plasma.”
+
+QG-PPR can instead assign query-conditioned relevance to nodes such as:
+
+[
+\text{Si/SiGe}
+\rightarrow
+\text{selectivity}
+\rightarrow
+\text{HBr/O}_2
+\rightarrow
+\text{etch condition}
+]
+
+while suppressing unrelated diffusion paths.
+
+The resulting PPR ranking is therefore more likely to surface passages containing the experimentally relevant process conditions.
+
+---
+
+# 20. Application Advantages
+
+QG-PPR can support:
+
+1. **Private semiconductor knowledge retrieval** by reasoning across heterogeneous proprietary documents.
+2. **Process recipe discovery** by connecting materials, process conditions, equipment parameters, and experimental results.
+3. **Cross-document technical reasoning** by connecting paper/document-level and passage-level evidence.
+4. **Materials and device research** by dynamically selecting the graph granularity most relevant to a research query.
+5. **GraphRAG systems** by providing a query-conditioned evidence retrieval layer before downstream generation.
+6. **Enterprise knowledge management** by reducing irrelevant evidence propagation in dense proprietary knowledge graphs.
+7. **Multi-hop scientific retrieval** by selectively propagating relevance across entity, passage, and document levels.
+
+---
+
+# 21. Core Inventive Concept
+
+The central inventive concept of QG-PPR can be summarized as:
+
+> **A query-conditioned graph diffusion mechanism that learns both where relevance should enter a multi-granular knowledge graph and where that relevance should propagate.**
+
+This differs fundamentally from simply learning a PPR damping factor or replacing manually tuned parameters with an MLP.
+
+The invention introduces two complementary controls:
+
+[
+\boxed{
+\text{Relevance Injection Control}
+}
+]
+
+and
+
+[
+\boxed{
+\text{Relevance Propagation Control}
+}
+]
+
+which together form:
+
+[
+\boxed{
+\text{Query-Conditioned Gated PPR (QG-PPR)}
+}
+]
+
+The resulting system converts a fixed PPR retrieval mechanism into a query-specific graph retrieval policy.
+
+---
+
+# 22. Recommended Terminology
+
+For consistency between the patent and the academic paper, the following terminology is recommended:
+
+| Previous terminology      | Recommended QG-PPR terminology                |
+| ------------------------- | --------------------------------------------- |
+| LearnedPPR                | **QG-PPR**                                    |
+| LearnedPPR policy         | **Query-conditioned policy**                  |
+| Adaptive personalization  | **Query-conditioned relevance injection**     |
+| Adaptive propagation      | **Query-conditioned propagation**             |
+| Multi-granularity routing | **Query-conditioned granularity routing**     |
+| Gated PPR                 | **Query-conditioned gated PPR**               |
+| Noise suppression         | **Query-conditioned propagation suppression** |
+| Learned diffusion policy  | **Query-conditioned graph diffusion policy**  |
+| M0                        | **Vanilla PPR**                               |
+| M1                        | **Query-Conditioned Injection**               |
+| M2                        | **Query-Conditioned Propagation**             |
+| M3                        | **QG-PPR / Joint Injection + Propagation**    |
+
+---
+
+# 23. One-Sentence Patent Summary
+
+> **QG-PPR is a query-conditioned multi-granular graph retrieval method that learns both where relevance should be injected into a knowledge graph and how that relevance should propagate through the graph, using query-conditioned gating and Personalized PageRank to suppress irrelevant diffusion and improve passage retrieval.**
