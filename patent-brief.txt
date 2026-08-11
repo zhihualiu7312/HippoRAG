@@ -1,0 +1,117 @@
+# QG-PPR
+
+## Query-Conditioned Gated PPR for Multi-Granular Graph Retrieval
+
+### 1. 요지
+
+QG-PPR是一种面向多粒度知识图谱检索的 **Query-Conditioned Gated Personalized PageRank** 方法。
+
+该方法根据Query Embedding，通过一个轻量级Policy动态生成不同粒度节点的routing weights、gate参数以及PPR diffusion参数，使不同Query能够采用不同的图检索策略。
+
+QG-PPR的核心是两个互补机制：
+
+* **Query-Conditioned Relevance Injection**：根据Query动态调整entity、passage和paper节点的初始personalization/relevance mass。
+* **Query-Conditioned Propagation**：在PPR图扩散过程中，根据Query-node relevance持续抑制低相关节点的传播。
+
+因此，QG-PPR能够同时学习：
+
+> **where to start and where to propagate.**
+
+---
+
+### 2. 확보 가능한 권리 범위
+
+1. 一种基于多粒度知识图谱的Query-conditioned Gated PPR检索方法，其中知识图谱至少包含entity、passage和paper节点。
+
+2. 一种Query-conditioned Policy，根据Query Embedding预测：
+
+   * granularity routing weights；
+   * node-type-specific gate thresholds/slopes；
+   * PPR diffusion parameter。
+
+3. 一种multi-granularity sigmoid gating机制，根据Query-node similarity对不同粒度节点进行软过滤，并用于调节PPR relevance。
+
+4. 一种Query-conditioned PPR diffusion机制，在图传播过程中持续抑制低相关节点的relevance propagation。
+
+5. 一种differentiable PPR训练方法，通过可微稀疏矩阵操作和pairwise ranking loss训练上述Query-conditioned retrieval policy。
+
+---
+
+### 3. 출원 사유
+
+传统PPR-based graph retrieval通常采用固定的personalization、node weighting和diffusion策略，难以针对不同Query动态调整图检索行为。
+
+QG-PPR通过Query-conditioned policy动态控制：
+
+[
+\text{Relevance Injection}
++
+\text{Graph Propagation}
+]
+
+从而使不同Query能够采用不同的图扩散策略，并减少无关节点造成的noise propagation。
+
+---
+
+### 4. 선행기술과의 차이점
+
+| 项目               | Conventional PPR          | QG-PPR                            |
+| ---------------- | ------------------------- | --------------------------------- |
+| Personalization  | Fixed / heuristic         | Query-conditioned                 |
+| Node filtering   | Uniform                   | Query-conditioned sigmoid gate    |
+| Granularity      | Fixed weighting           | Query-conditioned routing         |
+| Propagation      | Uniform diffusion         | Query-conditioned gated diffusion |
+| Damping          | Fixed / manually selected | Query-conditioned                 |
+| Retrieval policy | Query-independent         | Query-specific                    |
+
+QG-PPR的主要区别不是简单地学习一个PPR参数，而是**根据Query同时控制relevance injection和graph propagation**。
+
+---
+
+### 5. 核心创新点
+
+**Innovation 1 — Query-Conditioned Relevance Injection**
+
+根据Query动态调整不同粒度节点的initial relevance，使不同Query从不同的graph regions开始检索。
+
+**Innovation 2 — Query-Conditioned Propagation**
+
+在PPR diffusion过程中利用Query-conditioned node gates持续抑制低相关节点，减少multi-hop noise cascade。
+
+**Innovation 3 — Joint Gated PPR**
+
+将relevance injection和propagation gating统一到一个Query-conditioned PPR框架中，使模型能够同时学习：
+
+> **Where to start + Where to propagate**
+
+---
+
+### 6. 实验对应关系
+
+QG-PPR可以分解为四个模型：
+
+| Model | Description                               |
+| ----- | ----------------------------------------- |
+| M0    | Vanilla PPR                               |
+| M1    | Query-Conditioned Relevance Injection     |
+| M2    | Query-Conditioned Propagation             |
+| M3    | **QG-PPR: Joint Injection + Propagation** |
+
+其中M3为完整QG-PPR。
+
+当前实验结果显示，M3在Recall@2–Recall@200均优于M1和M2，说明relevance injection和propagation gating具有互补性。
+
+---
+
+### 7. Application Scenario
+
+QG-PPR适用于企业私有知识图谱和GraphRAG场景，例如半导体领域中的：
+
+* process recipes；
+* equipment data；
+* experimental reports；
+* defect/yield data；
+* technical papers；
+* semiconductor materials and device knowledge。
+
+尤其适合需要跨越 **entity → passage → paper/document** 多粒度节点进行multi-hop evidence retrieval的场景。
