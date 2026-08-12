@@ -10,3 +10,19 @@ Sun, X., et al. (2025). Youtu-GraphRAG: Vertically Unified Agents for Graph Retr
 Luu, A. T., et al. (2025). Graph-R1: Towards Agentic GraphRAG Framework via End-to-end Reinforcement Learning. arXiv preprint.
 Su, J., et al. (2025). When to use Graphs in RAG: A Comprehensive Analysis for Graph Retrieval-Augmented Generation. arXiv preprint. 
 Zhou, Z., et al. (2026). Query-Aware Flow Diffusion for Graph-Based RAG with Retrieval Guarantees. ICLR.
+
+
+| Method                     | Algorithmic adaptation                          | Graph operation           | Learned? | Main distinction from QG-PPR                                                   |
+| -------------------------- | ----------------------------------------------- | ------------------------- | :------: | ------------------------------------------------------------------------------ |
+| **HippoRAG2**              | Query-dependent personalization                 | PPR                       |     ✗    | Adapts **where PPR starts**, but not how relevance propagates                  |
+| **LinearRAG**              | Semantic node activation + global importance    | PPR                       |     ✗    | Selects an activated subgraph rather than learning diffusion behavior          |
+| **QAFD-RAG**               | Query-aware edge/flow weighting                 | Flow diffusion            |     ✗    | Adapts **edges**, rather than node-level gated PPR                             |
+| **MoG**                    | Query-conditioned expert selection              | Expert graph routing      |     ✗    | Selects **graph experts**, rather than continuously routing node granularities |
+| **G-reasoner**             | Graph foundation-model representation/reasoning | Learned graph propagation |     ✓    | Learns graph representations, not a retrieval-specific PPR policy              |
+| **Youtu-GraphRAG**         | Query decomposition + agentic exploration       | Agentic traversal         |     ✗    | Controls retrieval through an agent rather than continuous diffusion           |
+| **Graph-R1**               | RL-based retrieval actions                      | Agentic graph traversal   |     ✓    | Learns **retrieval actions**, rather than PPR dynamics                         |
+| **HGMem**                  | Hypergraph working-memory construction          | Hypergraph memory         |     ✗    | Optimizes memory organization rather than graph retrieval diffusion            |
+| **AGRAG**                  | Influence/cost-aware subgraph selection         | Subgraph optimization     |     ✗    | Selects an optimized reasoning subgraph rather than soft diffusion             |
+| **CS-RAG**                 | Query constraints + evidence verification       | Constrained retrieval     |     ✗    | Controls structural validity rather than continuous node propagation           |
+| **RAG without Forgetting** | Query-informed index update                     | Memory/index update       |     ✓    | Learns persistent retrieval memory rather than query-time diffusion            |
+| **QG-PPR (Ours)**          | **Granularity routing + node gating + damping** | **Gated PPR**             |   **✓**  | **Jointly learns where relevance is injected and how it propagates**           |
