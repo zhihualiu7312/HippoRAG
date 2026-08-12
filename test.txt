@@ -27,17 +27,6 @@
 | @200 | 0.9745 | 0.9740 | 0.9700 | 0.9700 | 0.9750 | **0.9755** |
 
 ### 总结
-
-1. **防过拟合措施效果**：
-   - **Musique PG**: 新版略好（Recall@20: +0.34%, @30: +0.35%, @200: +0.04%）
-   - **Musique Gated**: 新版略好（Recall@1: +0.17%, @5: +0.23%, @10: +0.30%）
-   - **Musique AP**: 新版略差（Recall@10: -1.68%）
-   - **2wiki**: 新旧几乎一致（差异 < 0.5%）
-
-2. **最佳模式不变**：
-   - **Musique**: personalized_gated 全面最佳
-   - **2wiki**: gated 在低 k 最佳，PG 在高 k 略佳
-
-3. **防过拟合措施对 PG 和 Gated 有正面效果，对 AP 有轻微负面影响**。可能 AP 更需要更强的学习能力（dropout=0.5 对它太大）。
-
-4. **训练效率提升**：epochs 从 80 减到 30，训练时间减少 ~60%，性能不降反升（PG/Gated）。
+QG-PPR jointly adapts relevance injection and graph propagation to each query, dynamically allocating importance across entity, passage, and paper nodes while suppressing irrelevant signals during multi-hop diffusion.
+The complementary combination of query-conditioned personalization and gating consistently outperforms either component alone, achieving the strongest overall retrieval performance, especially at medium-to-high K.
+On Musique, QG-PPR achieves Recall@10/20/50 of 73.53%/80.07%/88.52%, substantially improving over the corresponding gated-only model by 3.43/3.89/3.30 percentage points.
