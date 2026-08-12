@@ -1,0 +1,2 @@
+用英语重新表述下面这句话，意思不变，
+In multi-granular dense knowledge graph, there are many generic/high-degree entities which easily cause noise propagation when using PPR-based retrieval, and all hyper-parameters in PPR are fixed and manually tuned, 不管是什么粒度的，简单的还是难得query，都用固定得参数.
