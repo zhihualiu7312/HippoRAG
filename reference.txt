@@ -1,0 +1,12 @@
+Gutiérrez, B. J., et al. (2025). From RAG to Memory: Non-Parametric Continual Learning for Large Language Models. ICML.
+Zhao, L., et al. (2026). RAG without Forgetting: Continual Query-Infused Key Memory. arXiv preprint.
+Yu, M., et al. (2025). HGMEM: Hypergraph-based Working Memory to Improve Multi-step RAG for Long-Context Complex Relational Modeling. arXiv preprint.
+Huang, X., et al. (2025). LinearRAG: Linear Graph Retrieval Augmented Generation on Large-scale Corpora. arXiv preprint.
+Pan, S., et al. (2025). G-reasoner: Foundation Models for Unified Reasoning over Graph-structured Knowledge. arXiv preprint.
+Huang, X., et al. (2026). MoG: Mixture of Experts for Graph-based Retrieval-Augmented Generation. arXiv preprint.
+Marx, K., et al. (2026). Toward Robust GraphRAG: Mitigating Retrieval Drift and Hallucination from Imperfect Knowledge Graphs. arXiv preprint.
+Chen, L., et al. (2025). AGRAG: Advanced Graph-based Retrieval-Augmented Generation for LLMs. arXiv preprint.
+Sun, X., et al. (2025). Youtu-GraphRAG: Vertically Unified Agents for Graph Retrieval-Augmented Complex Reasoning. arXiv preprint.
+Luu, A. T., et al. (2025). Graph-R1: Towards Agentic GraphRAG Framework via End-to-end Reinforcement Learning. arXiv preprint.
+Su, J., et al. (2025). When to use Graphs in RAG: A Comprehensive Analysis for Graph Retrieval-Augmented Generation. arXiv preprint. 
+Zhou, Z., et al. (2026). Query-Aware Flow Diffusion for Graph-Based RAG with Retrieval Guarantees. ICLR.
