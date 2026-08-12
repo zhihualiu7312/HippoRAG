@@ -43,3 +43,6 @@ Zhou, Z., et al. (2026). Query-Aware Flow Diffusion for Graph-Based RAG with Ret
 | **CS-RAG**                 | Query constraints + evidence verification       | Constrained retrieval     |     ✗    | Controls structural validity rather than continuous node propagation           |
 | **RAG without Forgetting** | Query-informed index update                     | Memory/index update       |     ✓    | Learns persistent retrieval memory rather than query-time diffusion            |
 | **QG-PPR (Ours)**          | **Granularity routing + node gating + damping** | **Gated PPR**             |   **✓**  | **Jointly learns where relevance is injected and how it propagates**           |
+
+
+Existing methods adapt the seed, graph, edges, experts, subgraphs, or retrieval actions; QG-PPR learns a unified query-conditioned policy that jointly controls relevance injection and propagation within PPR.
