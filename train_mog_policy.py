@@ -187,29 +187,34 @@ def build_training_examples(
 # ---------------------------------------------------------------------------
 
 class MoGMLP(nn.Module):
-    """Torch MLP: query_emb → (alpha, beta, gamma, tau_pass, tau_paper, tau_ent, damping).
+    """Torch MLP: query_emb → (alpha, beta, gamma, tau_pass, tau_paper, tau_ent, k_pass, k_paper, k_ent, damping).
 
-    Architecture: Linear(input, hidden) → ReLU → Linear(hidden, 7)
+    Architecture: Linear(input, hidden) → ReLU → Linear(hidden, 10)
     - First 3 outputs: softmax → (alpha, beta, gamma)
     - Next 3 outputs: sigmoid → (tau_pass, tau_paper, tau_ent)
+    - Next 3 outputs: sigmoid → [1, 20] → (k_pass, k_paper, k_ent) per-type gate slopes
     - Last output: sigmoid → damping in [0.3, 0.95]
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int = 32):
+    def __init__(self, input_dim: int, hidden_dim: int = 32, dropout: float = 0.3):
         super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, 7)
+        self.dropout = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(hidden_dim, 10)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         h = torch.relu(self.fc1(x))
+        h = self.dropout(h)
         out = self.fc2(h)
         # Softmax for (alpha, beta, gamma)
-        abg = torch.softmax(out[:3], dim=0)
+        abg = torch.softmax(out[:3], dim=-1)
         # Sigmoid for thresholds
         taus = torch.sigmoid(out[3:6])
+        # Sigmoid for per-type slopes k, mapped to [1, 20]
+        ks = 1.0 + 19.0 * torch.sigmoid(out[6:9])
         # Sigmoid for damping, mapped to [0.3, 0.95]
-        damping = 0.3 + 0.65 * torch.sigmoid(out[6:7])
-        return abg, taus, damping
+        damping = 0.3 + 0.65 * torch.sigmoid(out[9:10])
+        return abg, taus, ks, damping
 
 
 def build_sparse_adjacency(graph, device: torch.device) -> torch.Tensor:
@@ -265,26 +270,55 @@ def differentiable_ppr(
     damping: torch.Tensor,
     gates: torch.Tensor,
     depth: int = 10,
+    gate_mode: str = "gated",
 ) -> torch.Tensor:
     """Differentiable PPR via sparse matrix multiply.
 
-    Iterates: scores = damping * seeds + (1-damping) * M @ (scores * gates)
+    Damping convention: damping = follow-link probability (igraph convention).
+    restart = 1 - damping = teleport probability.
+
+    Gate modes:
+      - 'adaptive_personalization': gate on reset only
+          scores = (1-damping) * (gates ⊙ seeds) + damping * M @ scores
+      - 'gated': gate on propagation only
+          scores = (1-damping) * seeds + damping * M @ (gates ⊙ scores)
+      - 'personalized_gated': gate on both reset and propagation
+          scores = (1-damping) * (gates ⊙ seeds) + damping * M @ (gates ⊙ scores)
 
     Args:
         M_sparse: (N, N) row-normalised adjacency (torch sparse)
         seeds_vec: (N,) personalization vector (torch)
-        damping: scalar in [0.3, 0.95] (torch, differentiable)
+        damping: scalar in [0.3, 0.95] (torch, differentiable) = follow-link probability
         gates: (N,) node gates (torch, differentiable)
         depth: PPR iterations
+        gate_mode: one of 'adaptive_personalization', 'gated', 'personalized_gated'
 
     Returns:
         scores: (N,) PPR scores (fully differentiable)
     """
+    use_transition_gate = gate_mode in ("gated", "personalized_gated")
+    use_reset_gate = gate_mode in ("adaptive_personalization", "personalized_gated")
+
+    # Normalize seeds_vec to sum=1 (consistent with inference)
+    seeds_vec = seeds_vec / (seeds_vec.sum() + 1e-12)
+
     scores = seeds_vec.clone()
     for _ in range(depth):
-        gated = scores * gates
+        if use_transition_gate:
+            gated = scores * gates
+        else:
+            gated = scores
         propagated = torch.sparse.mm(M_sparse, gated.unsqueeze(1)).squeeze(1)
-        scores = damping * seeds_vec + (1.0 - damping) * propagated
+
+        if use_reset_gate:
+            reset_vec = seeds_vec * gates
+            # Re-normalize after gating
+            reset_vec = reset_vec / (reset_vec.sum() + 1e-12)
+        else:
+            reset_vec = seeds_vec
+
+        # damping = follow-link probability, 1-damping = teleport
+        scores = (1.0 - damping) * reset_vec + damping * propagated
     return scores
 
 
@@ -295,8 +329,9 @@ def compute_gates_torch(
     all_embs: torch.Tensor,
     node_type_ids: torch.Tensor,
     k: float = 5.0,
+    ks: torch.Tensor = None,
 ) -> torch.Tensor:
-    """Compute differentiable node gates.
+    """Compute differentiable node gates with optional per-type slopes.
 
     Args:
         abg: (3,) routing weights (alpha, beta, gamma)
@@ -304,7 +339,8 @@ def compute_gates_torch(
         query_emb: (D,) query embedding
         all_embs: (N, D) all node embeddings
         node_type_ids: (N,) type id per node (0=passage, 1=paper, 2=entity)
-        k: sigmoid slope
+        k: sigmoid slope (used when ks is None, i.e. old format)
+        ks: (3,) per-type slopes (k_pass, k_paper, k_ent), overrides k if provided
 
     Returns:
         gates: (N,) differentiable node gates
@@ -312,12 +348,13 @@ def compute_gates_torch(
     # Cosine similarity (all_embs assumed normalised)
     sims = torch.matmul(all_embs, query_emb)  # (N,)
 
-    # Per-type gate: σ(k * (sim - τ)) × mog_weight
+    # Per-type gate: σ(k_type * (sim - τ)) × mog_weight
     gates = torch.zeros_like(sims)
     for t in range(3):
         mask = (node_type_ids == t)
         if mask.any():
-            gate_t = torch.sigmoid(k * (sims[mask] - taus[t])) * abg[t]
+            k_t = ks[t] if ks is not None else k
+            gate_t = torch.sigmoid(k_t * (sims[mask] - taus[t])) * abg[t]
             gates[mask] = gate_t
 
     return gates
@@ -333,8 +370,12 @@ def train_mog_policy_differentiable(
     device: str = "auto",
     ppr_depth: int = 10,
     gate_k: float = 5.0,
-    margin: float = 0.1,
+    margin: float = 0.01,
+    dropout: float = 0.3,
+    weight_decay: float = 1e-4,
     output_path: str = None,
+    remine_interval: int = 0,
+    gate_mode: str = "gated",
 ) -> MoGPolicy:
     """Train MoGPolicy using differentiable PPR (end-to-end backprop).
 
@@ -345,7 +386,7 @@ def train_mog_policy_differentiable(
     logger.info(
         f"Training MoGPolicy (differentiable PPR, device={dev}): "
         f"{len(examples)} examples, {epochs} epochs, input_dim={input_dim}, "
-        f"ppr_depth={ppr_depth}"
+        f"ppr_depth={ppr_depth}, gate_mode={gate_mode}"
     )
 
     n_nodes = rag.graph.vcount()
@@ -435,13 +476,85 @@ def train_mog_policy_differentiable(
     logger.info(f"  Split: {len(train_set)} train, {len(eval_set)} eval (fixed)")
 
     # --- Initialise torch MLP ---
-    mlp = MoGMLP(input_dim=input_dim, hidden_dim=hidden_dim).to(dev)
-    optimizer = torch.optim.Adam(mlp.parameters(), lr=learning_rate)
+    mlp = MoGMLP(input_dim=input_dim, hidden_dim=hidden_dim, dropout=dropout).to(dev)
+
+    # --- Warm start: load existing best model from same dataset if available ---
+    if output_path:
+        warm_start_path = output_path.replace(".pkl", "_best.pkl")
+        if os.path.exists(warm_start_path):
+            try:
+                with open(warm_start_path, "rb") as f:
+                    ckpt = pickle.load(f)
+                # Check compatibility: ckpt._W2 shape must match mlp.fc2
+                expected_w2_shape = (hidden_dim, 10)  # new 10-param format
+                if ckpt._W2.shape == (hidden_dim, expected_w2_shape[1]):
+                    mlp.fc1.weight.data = torch.tensor(
+                        ckpt._W1.T, dtype=torch.float32, device=dev
+                    )
+                    mlp.fc1.bias.data = torch.tensor(
+                        ckpt._b1, dtype=torch.float32, device=dev
+                    )
+                    mlp.fc2.weight.data = torch.tensor(
+                        ckpt._W2.T, dtype=torch.float32, device=dev
+                    )
+                    mlp.fc2.bias.data = torch.tensor(
+                        ckpt._b2, dtype=torch.float32, device=dev
+                    )
+                    logger.info(f"  Warm started from {warm_start_path}")
+                else:
+                    logger.info(
+                        f"  Skipping warm start: ckpt shape {ckpt._W2.shape} "
+                        f"!= expected {expected_w2_shape}"
+                    )
+            except Exception as e:
+                logger.warning(f"  Warm start failed: {e}")
+
+    optimizer = torch.optim.Adam(mlp.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     # StepLR: halve lr every step_size epochs (e.g. 0.003 → 0.0015 → 0.00075)
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer, step_size=max(epochs // 3, 1), gamma=0.5
     )
+
+    best_eval_acc = -1.0
+
+    # --- Build passage node set for re-mining ---
+    passage_idx_tensor = torch.tensor(
+        list(rag.passage_node_idxs), dtype=torch.long, device=dev
+    )
+
+    def _remine_negatives():
+        """Re-mine hardest negatives using current MLP."""
+        mlp.eval()
+        remined_count = 0
+        with torch.no_grad():
+            for item in train_set:
+                abg, taus, ks, damping = mlp(item["query_emb"])
+                gates = compute_gates_torch(
+                    abg, taus, item["query_emb"], all_embs, node_type_ids, ks=ks
+                )
+                scores = differentiable_ppr(
+                    M_sparse, item["seeds_vec"], damping, gates, depth=ppr_depth,
+                    gate_mode=gate_mode
+                )
+                pos_score = scores[item["pos_idx"]].item()
+                # Find passage node with score closest to positive (hardest negative)
+                passage_scores = scores[passage_idx_tensor]
+                # Exclude positive node
+                pos_mask = passage_idx_tensor == item["pos_idx"]
+                passage_scores = passage_scores.masked_fill(pos_mask, float('inf'))
+                # Find the passage with score closest to pos_score
+                diffs = (passage_scores - pos_score).abs()
+                best_neg_local = torch.argmin(diffs).item()
+                new_neg = passage_idx_tensor[best_neg_local].item()
+                if new_neg != item["neg_idx"]:
+                    item["neg_idx"] = new_neg
+                    remined_count += 1
+        mlp.train()
+        logger.info(
+            f"  Re-mining complete: {remined_count}/{len(train_set)} "
+            f"negatives updated."
+        )
 
     def _save_checkpoint(epoch_num: int):
         """Save current MLP weights as a MoGPolicy checkpoint."""
@@ -453,6 +566,13 @@ def train_mog_policy_differentiable(
         return ckpt
 
     for epoch in range(epochs):
+        # Re-mine hard negatives every remine_interval epochs
+        if remine_interval > 0 and epoch > 0 and epoch % remine_interval == 0:
+            logger.info(f"  Re-mining hard negatives at epoch {epoch+1}...")
+            remine_start = time.time()
+            _remine_negatives()
+            logger.info(f"  Re-mining took {time.time() - remine_start:.1f}s")
+
         total_loss = 0.0
         correct = 0
         epoch_start = time.time()
@@ -463,17 +583,18 @@ def train_mog_policy_differentiable(
             neg_idx = item["neg_idx"]
             query_emb = item["query_emb"]
 
-            # Forward: query_emb → MLP → (α, β, γ, τ, damping)
-            abg, taus, damping = mlp(query_emb)
+            # Forward: query_emb → MLP → (α, β, γ, τ, k_pass, k_paper, k_ent, damping)
+            abg, taus, ks, damping = mlp(query_emb)
 
-            # Compute differentiable gates
+            # Compute differentiable gates with per-type slopes
             gates = compute_gates_torch(
-                abg, taus, query_emb, all_embs, node_type_ids, k=gate_k
+                abg, taus, query_emb, all_embs, node_type_ids, ks=ks
             )
 
             # Differentiable PPR
             scores = differentiable_ppr(
-                M_sparse, seeds_vec, damping, gates, depth=ppr_depth
+                M_sparse, seeds_vec, damping, gates, depth=ppr_depth,
+                gate_mode=gate_mode
             )
 
             # Normalise scores so margin is meaningful (PPR scores are ~1e-4)
@@ -499,20 +620,22 @@ def train_mog_policy_differentiable(
         accuracy = correct / len(train_set) if train_set else 0
         current_lr = optimizer.param_groups[0]["lr"]
 
-        if (epoch + 1) % 10 == 0 or epoch == 0:
+        if (epoch + 1) % 5 == 0 or epoch == 0:
+            avg_train_loss = total_loss / len(train_set) if train_set else 0
             logger.info(
-                f"  Epoch {epoch+1}/{epochs}: loss={total_loss:.4f}, "
+                f"  Epoch {epoch+1}/{epochs}: avg_loss={avg_train_loss:.6f}, "
                 f"train_acc={accuracy:.4f} ({correct}/{len(train_set)}), "
                 f"lr={current_lr:.6f}, time={epoch_time:.1f}s"
             )
 
-        # Checkpoint + eval every 10 epochs
-        if (epoch + 1) % 10 == 0:
+        # Checkpoint + eval every 5 epochs
+        if (epoch + 1) % 5 == 0:
             ckpt_policy = _save_checkpoint(epoch + 1)
 
             # Save checkpoint to disk
             if output_path:
                 ckpt_path = output_path.replace(".pkl", f"_epoch{epoch+1}.pkl")
+                os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
                 with open(ckpt_path, "wb") as f:
                     pickle.dump(ckpt_policy, f)
 
@@ -521,12 +644,13 @@ def train_mog_policy_differentiable(
             eval_loss = 0.0
             with torch.no_grad():
                 for item in eval_set:
-                    abg, taus, damping = mlp(item["query_emb"])
+                    abg, taus, ks, damping = mlp(item["query_emb"])
                     gates = compute_gates_torch(
-                        abg, taus, item["query_emb"], all_embs, node_type_ids, k=gate_k
+                        abg, taus, item["query_emb"], all_embs, node_type_ids, ks=ks
                     )
                     scores = differentiable_ppr(
-                        M_sparse, item["seeds_vec"], damping, gates, depth=ppr_depth
+                        M_sparse, item["seeds_vec"], damping, gates, depth=ppr_depth,
+                        gate_mode=gate_mode
                     )
                     score_max = scores.max().clamp(min=1e-8)
                     pos_score = scores[item["pos_idx"]] / score_max
@@ -537,11 +661,24 @@ def train_mog_policy_differentiable(
                     eval_loss += float(loss.item())
 
             eval_acc = eval_correct / len(eval_set) if eval_set else 0
+            avg_eval_loss = eval_loss / len(eval_set) if eval_set else 0
             logger.info(
                 f"  [Checkpoint] Epoch {epoch+1}: "
-                f"eval_loss={eval_loss:.4f}, eval_acc={eval_acc:.4f} "
+                f"avg_eval_loss={avg_eval_loss:.6f}, eval_acc={eval_acc:.4f} "
                 f"({eval_correct}/{len(eval_set)}), lr={current_lr:.6f}"
             )
+
+            # Save best model based on eval_acc
+            if eval_acc > best_eval_acc and output_path:
+                best_eval_acc = eval_acc
+                best_path = output_path.replace(".pkl", "_best.pkl")
+                os.makedirs(os.path.dirname(best_path), exist_ok=True)
+                with open(best_path, "wb") as f:
+                    pickle.dump(ckpt_policy, f)
+                logger.info(
+                    f"  [Best] Epoch {epoch+1}: New best eval_acc={eval_acc:.4f}, "
+                    f"saved to {best_path}"
+                )
 
     # --- Copy weights back to numpy MoGPolicy ---
     policy = _save_checkpoint(epochs)
@@ -579,7 +716,7 @@ def main():
     parser.add_argument("--config", default="configs/samsung_heuristic_diffusion_paper.yaml")
     parser.add_argument("--dataset", default="musique")
     parser.add_argument("--num_train", type=int, default=500, help="Number of training queries (first N)")
-    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--learning_rate", type=float, default=0.001)
     parser.add_argument("--hidden_dim", type=int, default=32)
     parser.add_argument("--output", default=None, help="Output path for trained policy")
@@ -615,6 +752,30 @@ def main():
         type=float,
         default=0.01,
         help="Hinge loss margin (default: 0.01)",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=0.5,
+        help="Dropout rate for MoGMLP (default: 0.5)",
+    )
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=1e-4,
+        help="L2 weight decay for Adam optimizer (default: 1e-4)",
+    )
+    parser.add_argument(
+        "--remine_interval",
+        type=int,
+        default=0,
+        help="Re-mine hard negatives every N epochs (0=disabled, default: 0)",
+    )
+    parser.add_argument(
+        "--gate_mode",
+        default=None,
+        choices=["adaptive_personalization", "gated", "personalized_gated"],
+        help="PPR gate mode (default: read from config ppr_gate_mode, or 'gated')",
     )
     args = parser.parse_args()
 
@@ -699,9 +860,24 @@ def main():
         if not os.path.exists(graph_path):
             raise FileNotFoundError(f"Index not found at {graph_path}")
 
-        output_path = args.output or os.path.join(
-            config.save_dir, "mog_policy.pkl"
-        )
+        if args.output:
+            output_path = args.output
+        else:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            model_subdir = (
+                f"dr{args.dropout}_wd{args.weight_decay}"
+                f"_lr{args.learning_rate}_hd{args.hidden_dim}_{timestamp}"
+            )
+            model_dir = os.path.join(config.save_dir, "models", model_subdir)
+            output_path = os.path.join(model_dir, "policy.pkl")
+
+
+        # Resolve gate_mode: CLI arg > config > default
+        effective_gate_mode = args.gate_mode
+        if effective_gate_mode is None:
+            effective_gate_mode = getattr(config, 'ppr_gate_mode', 'gated')
+        logger.info(f"Using ppr_gate_mode: {effective_gate_mode}")
 
         logger.info(f"Training MoG policy (differentiable PPR, device={args.device})...")
         train_start = time.time()
@@ -716,7 +892,11 @@ def main():
             ppr_depth=args.ppr_depth,
             gate_k=args.gate_k,
             margin=args.margin,
+            dropout=args.dropout,
+            weight_decay=args.weight_decay,
             output_path=output_path,
+            remine_interval=args.remine_interval,
+            gate_mode=effective_gate_mode,
         )
 
         train_time = time.time() - train_start
