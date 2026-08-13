@@ -1,0 +1,48 @@
+## Musique vs 2wiki 图结构完整对比
+
+### 节点统计
+
+| 类型 | Musique n | Musique % | 2wiki n | 2wiki % |
+|------|-----------|-----------|---------|---------|
+| entity | 109,627 | 83.6% | 53,521 | 81.3% |
+| passage (chunk) | 11,656 | 8.9% | 6,119 | 9.3% |
+| paper | 9,838 | 7.5% | 6,119 | 9.3% |
+| **Total** | **131,121** | | **65,759** | |
+
+### 度分布（按类型）
+
+| 类型 | Musique mean | Musique median | Musique max | 2wiki mean | 2wiki median | 2wiki max |
+|------|-------------|----------------|-------------|------------|--------------|------------|
+| passage | 15.9 | 14 | 93 | 15.3 | 12 | 121 |
+| paper | 2.4 | 2 | 56 | 2.0 | 2 | 2 |
+| entity | 45.5 | 19 | 3,106 | 60.7 | 25 | 1,735 |
+
+### 边类型
+
+| 边类型 | Musique n | Musique % | 2wiki n | 2wiki % |
+|--------|-----------|-----------|---------|---------|
+| entity-entity | 2,410,911 | 92.9% | 1,585,082 | 94.4% |
+| entity-passage | 162,084 | 6.2% | 81,206 | 4.8% |
+| paper-passage | 23,312 | 0.9% | 12,238 | 0.7% |
+
+### 边权重（按类型）
+
+| 边类型 | Musique mean | Musique range | 2wiki mean | 2wiki range |
+|--------|-------------|---------------|------------|-------------|
+| entity-entity | 0.861 | [0.800, 44.000] | 0.862 | [0.800, 9.000] |
+| entity-passage | 1.000 | [1.000, 1.000] | 1.000 | [1.000, 1.000] |
+| paper-passage | 0.920 | [0.328, 0.994] | 0.975 | [0.505, 1.000] |
+
+### 关键发现
+
+1. **Passage 度分布相似**：两个数据集 passage 平均度 ~15，说明每个 passage 连接约 15 个 entity。但 musique median=14 > 2wiki median=12，说明 2wiki 有更多低连接的 passage。
+
+2. **Paper 节点度极低**：两个数据集 paper median=2，说明每个 paper 只连接 2 个 passage（即 paper→passage 的 1:1 映射 + 对称边）。2wiki 的 paper max=2（完全固定），musique 有少数 paper 连接更多（max=56）。
+
+3. **Entity 度差异大**：2wiki entity mean=60.7 vs musique 45.5（+33%），2wiki entity 更密集。这解释了 2wiki PPR 收敛更快。
+
+4. **Entity-passage 边权重恒为 1.0**：说明 passage 到 entity 的连接是无权重的（权重=1），而 entity-entity 边有权重（0.8-44）。
+
+5. **无 entity-paper 直接边**：paper 只通过 passage 连接（paper-passage 边），不直接连接 entity。这是 HippoRAG 的设计——paper 是 passage 的聚合节点。
+
+6. **Musique 有极端高权重边**：entity-entity max=44（vs 2wiki 的 9），这些高权重边可能在 PPR 中造成"捷径"效应，需要更多迭代来平衡。
