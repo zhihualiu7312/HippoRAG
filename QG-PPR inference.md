@@ -22,3 +22,44 @@ Output: ranked passage list R
 12. R ← TopK(passage scores from p)
 13. return R
 
+Algorithm: QG-PPR Inference
+
+Input:
+    query q
+    fixed graph G = (V, E)
+    trained policy πθ
+
+Output:
+    ranked passage list R
+
+1.  hq ← Embed(q)
+
+2.  // Query-conditioned policy
+3.  (θR, θD, dq) ← πθ(hq)
+    // θR: reset-gate parameters
+    // θD: diffusion-gate parameters
+
+4.  // Initial relevance from fact retrieval
+5.  s ← BuildResetVector(FactRetrieval(q, G))
+
+6.  // Query-conditioned reset gate
+7.  gR ← ResetGate(hq, V; θR)
+
+8.  // Gated relevance injection
+9.  sR ← Normalize(s ⊙ gR)
+
+10. // Query-conditioned diffusion gate
+11. gD ← DiffusionGate(hq, V; θD)
+
+12. // Gated PPR diffusion
+13. p(0) ← s
+
+14. for t = 0 ... T−1:
+15.     p(t+1) ←
+           (1 − dq) · sR
+           + dq · M · (gD ⊙ p(t))
+
+16. R ← TopK(p(T) restricted to passage nodes)
+
+17. return R
+
