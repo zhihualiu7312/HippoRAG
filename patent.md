@@ -25,3 +25,20 @@
 	B. 선행에서 예측가능하나, 현저한 효과
 	C. 선행보다 향상된 효과
 	D. 선행과 차별되는 효과가 미미
+
+Recommended concise version for the evaluation form
+
+Applicability — A:
+Applicable to GraphRAG, enterprise knowledge retrieval, technical literature search, and knowledge-intensive QA, with potential for product adoption within three years.
+
+Business Contribution — B:
+Can serve as a core retrieval technology for GraphRAG systems by improving evidence recall and downstream QA quality for complex and multi-hop queries.
+
+Technical Originality — A:
+Introduces a query-conditioned node-level diffusion policy that dynamically controls granularity-aware relevance injection and propagation on a fixed multi-granular graph, providing a distinct alternative to fixed PPR and query-conditioned edge-level diffusion.
+
+Difficulty of Technical Substitution — A:
+The integrated query-conditioned gating and adaptive PPR diffusion mechanism is not readily replaceable through simple parameter or model substitution and would require a different graph retrieval architecture.
+
+Technical Effectiveness — A:
+Significantly improves retrieval performance over HippoRAG2, achieving +7.32 percentage points in R@10, +7.85 points in R@50, and +5.30 points in R@200 on MuSiQue.
