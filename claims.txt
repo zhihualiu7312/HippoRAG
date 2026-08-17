@@ -1,0 +1,17 @@
+1. A method for query-conditioned graph retrieval using personalized PageRank over a multi-granular knowledge graph, comprising:
+
+obtaining a query and generating a query representation corresponding to the query;
+
+obtaining a fixed multi-granular knowledge graph comprising a plurality of knowledge nodes having different granularities, wherein the different granularities comprise at least entity nodes, passage nodes, and document-level nodes;
+
+generating, by a query-conditioned policy network based on the query representation, retrieval control parameters comprising at least one granularity-aware gating parameter and a graph diffusion parameter;
+
+performing an initial retrieval operation for the query to obtain an initial retrieval result and generating a reset vector based on the initial retrieval result;
+
+determining a query-conditioned gating weight for each knowledge node based on the query representation and the corresponding gating parameter;
+
+generating a gated reset vector by applying the query-conditioned gating weights to the reset vector;
+
+performing personalized PageRank diffusion over the fixed multi-granular knowledge graph using the gated reset vector and the graph diffusion parameter, wherein relevance information is propagated through the graph according to graph connectivity and the query-conditioned gating weights; and
+
+ranking passage nodes according to diffusion scores obtained from the personalized PageRank diffusion and outputting the ranked passage nodes as retrieval results.
