@@ -42,3 +42,13 @@ The integrated query-conditioned gating and adaptive PPR diffusion mechanism is 
 
 Technical Effectiveness — A:
 Significantly improves retrieval performance over HippoRAG2, achieving +7.32 percentage points in R@10, +7.85 points in R@50, and +5.30 points in R@200 on MuSiQue.
+
+
+1. More Relevant Starting Points
+Query-adaptive reset focuses relevance on the most useful nodes and granularities.
+
+2. Less Noisy Propagation
+Query-conditioned gating suppresses irrelevant paths and prevents noise from spreading through the graph.
+
+3. More Effective Graph Exploration
+Adaptive diffusion balances restart and propagation, enabling deeper exploration when useful and avoiding unnecessary diffusion.
