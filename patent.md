@@ -44,11 +44,8 @@ Technical Effectiveness — A:
 Significantly improves retrieval performance over HippoRAG2, achieving +7.32 percentage points in R@10, +7.85 points in R@50, and +5.30 points in R@200 on MuSiQue.
 
 
-1. More Relevant Starting Points
-Query-adaptive reset focuses relevance on the most useful nodes and granularities.
+Key Effect 1 — More Relevant Starting Points: Query-conditioned relevance allocation enables the system to focus retrieval on knowledge nodes that are more relevant to the current query.
 
-2. Less Noisy Propagation
-Query-conditioned gating suppresses irrelevant paths and prevents noise from spreading through the graph.
+Key Effect 2 — Less Irrelevant Propagation: Query-conditioned node gating suppresses relevance propagation through irrelevant or overly connected nodes, reducing noise amplification in dense knowledge graphs.
 
-3. More Effective Graph Exploration
-Adaptive diffusion balances restart and propagation, enabling deeper exploration when useful and avoiding unnecessary diffusion.
+Key Effect 3 — More Effective Multi-hop Retrieval: Adaptive diffusion control enables relevance to propagate to an appropriate depth for each query, improving the discovery of multi-hop evidence while reducing unnecessary graph traversal.
